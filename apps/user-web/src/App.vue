@@ -36,6 +36,7 @@ import { buildAdminSsoUrl } from './utils/adminUrl'
 import { sortSessionsByRecentActivity } from './utils/sessionOrdering'
 import { formatExactTokenAmount, formatQuotaUsagePercent, formatTokenAmount, quotaUsagePercent } from './utils/tokenNumberFormat'
 import { useChatRuntimeStore, type PendingRuntimeDocument } from './composables/useChatRuntimeStore'
+import type { SessionLiveAccessRevokedReason } from './composables/useSessionLiveStream'
 import { useDshCodeRuntime } from './composables/code/useDshCodeRuntime'
 import { useUserBoundProjects } from './composables/code/userBoundProjects'
 import { boundProjectWorktree } from './composables/code/projectAuthorization'
@@ -1881,6 +1882,62 @@ function handleSessionLeft(sessionId: string) {
   void loadSharedSessions(true).catch(() => {})
 }
 
+// T10: read-only consumption of T7's access-loss latch. Both loss paths — T8's
+// typed POST ChatStreamAccessRevokedEvent and T7's session-SSE onAccessLost
+// binding — already converge on the single markAccessLost writer, which aborts
+// the live stream, the local POST handle, and the recovery controller exactly
+// once. This never tears anything down itself; it only reacts to the settled
+// flag: clear the pane per the T24 delete convention (removeSession starts a
+// blank pane when it was current), drop the row from "Shared with me", and show
+// one non-sensitive notice. Each pane key is handled at most once, and handled
+// keys are pruned with their pane so an access-restored session can be handled
+// again — a repeated read can never re-clear or toast-loop.
+const accessLostHandledPanes = new Set<string>()
+
+watch(
+  () => visibleChatPanes.value.filter((pane) => pane.accessLost).map((pane) => pane.key),
+  (lostPaneKeys) => {
+    const livePaneKeys = new Set(visibleChatPanes.value.map((pane) => pane.key))
+    for (const handledKey of accessLostHandledPanes) {
+      if (!livePaneKeys.has(handledKey)) accessLostHandledPanes.delete(handledKey)
+    }
+    for (const paneKey of lostPaneKeys) {
+      if (accessLostHandledPanes.has(paneKey)) continue
+      accessLostHandledPanes.add(paneKey)
+      handlePaneAccessLost(paneKey)
+    }
+  },
+)
+
+// Non-sensitive wording only: never names the actor or the transport that
+// reported the loss. participant_left reuses the existing share notice the
+// leave dialog already owns; a removal (or a latch with no typed reason) gets
+// the generic access-lost copy.
+function accessLostNoticeMessage(reason: SessionLiveAccessRevokedReason | null): string {
+  const generic = locale.value === 'zh' ? '你已无法访问该会话。' : 'You no longer have access to this session.'
+  switch (reason) {
+    case 'participant_left':
+      return t('session.share.left')
+    case 'participant_removed':
+    case null:
+      return generic
+    default: {
+      const _exhaustive: never = reason
+      void _exhaustive
+      return generic
+    }
+  }
+}
+
+function handlePaneAccessLost(paneKey: string) {
+  const pane = visibleChatPanes.value.find((item) => item.key === paneKey)
+  if (!pane?.sessionId) return
+  const { sessionId, accessLostReason } = pane
+  chatRuntime.removeSession(sessionId)
+  sharedSessions.value = sharedSessions.value.filter((session) => session.id !== sessionId)
+  shareToast.warning(accessLostNoticeMessage(accessLostReason))
+}
+
 // T27: the share-link landing flow. captureSessionShareToken runs at the top of
 // onMounted — BEFORE any navigateTo (navigateTo pushes only the path, and the
 // parameter must never survive in history) — strips ?session-share= from the URL
@@ -1980,6 +2037,13 @@ async function handlePaneSend(
     authToken: authToken.value || null,
     userId: getUserId(),
     mainId: getMainId(),
+    viewerAuthor: userProfile.value
+      ? {
+          user_id: String(userProfile.value.userId ?? getUserId() ?? ''),
+          display_name: userProfile.value.name || userProfile.value.username || null,
+          avatar_url: userProfile.value.avatar || null,
+        }
+      : null,
     locale: locale.value === 'en' ? 'en' : 'zh',
     timezone: timezoneValue.value,
   })
@@ -2654,6 +2718,7 @@ onBeforeUnmount(() => {
         :user-id="getUserId() || ''"
         :main-id="getMainId()"
         :auth-token="authToken"
+        :refresh-token="chatRuntime.membersRevisionFor(currentSessionId)"
         @left="handleSessionLeft"
       />
 
@@ -2865,6 +2930,7 @@ onBeforeUnmount(() => {
               :session-id="pane.sessionId || undefined"
               :model-instance-id="pane.modelInstanceId || undefined"
               :active="pane.key === activeChatKey"
+              :shared="pane.shared"
               :user-id="getUserId() || undefined"
               :main-id="getMainId()"
               :auth-token="authToken"
@@ -2872,6 +2938,7 @@ onBeforeUnmount(() => {
               :foreign-run="pane.foreignRun"
               :foreign-run-finished="pane.foreignRunFinished"
               :refreshing-session="pane.refreshingSession"
+              :busy-notice="pane.busyNotice"
               :stopping="pane.stopping || codeRuntime.stateFor(pane.key).stopping"
               :active-intervention="pane.activeIntervention"
               :code-workspace="codeRuntime.stateFor(pane.key).workspace"

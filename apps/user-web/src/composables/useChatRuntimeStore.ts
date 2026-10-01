@@ -1,8 +1,21 @@
-import { computed, reactive, ref } from 'vue'
+import { computed, markRaw, reactive, ref } from 'vue'
 import { fetchOrgBilling } from '../api/auth'
 import { uploadChatDocument, uploadChatImage, type UploadedDocument, type UploadedImage } from '../api/chat'
-import { getSession, type ChatMessage, type SessionDetail, type SessionSummary } from '../api/sessions'
+import { getSession, type ChatMessage, type ChatMessageAuthor, type SessionDetail, type SessionSummary } from '../api/sessions'
 import { fetchChatMessageEvents, startChatStream, ChatStreamHttpError, SESSION_ALREADY_RUNNING, type ChatStreamHandle } from './useChatStream'
+import {
+  applyEffectiveUserMessageId,
+  bufferPreHeaderEvent,
+  createPreHeaderBufferState,
+  drainPreHeaderEvents,
+  isManualOnlyConflict,
+  mergeAuthoritativeMessages,
+  shouldIgnoreSessionExecution,
+  shouldReleaseToDurableRecovery,
+  utf8ByteLength,
+  withoutMessages,
+  type PreHeaderBufferState,
+} from './sessionLiveProjection'
 import { getLocale, t } from './i18n'
 import { resumeBrowserInterventionTaskUntilSettled } from './tasks/browserInterventionTaskFlow'
 import {
@@ -18,6 +31,14 @@ import { applyAssistantContentEvent } from '../features/execution-v3/domain/assi
 import type { BrowserAssistanceHandoff } from './browser/useBrowserWorkspace'
 import { stopChatGeneration } from './chatCancellation'
 import { foreignRunForViewer, type ForeignRun } from './sessionRunPresence'
+import {
+  noteSessionLiveControlFrame,
+  noteSessionLiveData,
+  startSessionLiveStream,
+  type SessionLiveAccessRevokedReason,
+  type SessionLiveExecutionEvent,
+  type SessionLiveStreamHandle,
+} from './useSessionLiveStream'
 
 export type RuntimeDocumentInfo = {
   id?: string
@@ -55,6 +76,12 @@ export type RuntimeMessage = {
    *  the author's user_id preserved from session-GET messages by
    *  normalizeMessages. Absent on legacy/system-shaped messages. */
   user_id?: string
+  /** T5: stable server-computed merge identity, consumed verbatim. */
+  legacy_key?: string
+  /** T5: allocated message sequence; `0` marks a DEGRADED unsequenced row. */
+  seq?: number
+  /** T5: authoritative user-message author projection; T9 renders this. */
+  author?: ChatMessageAuthor | null
   execution_events?: any[]
   documents?: RuntimeDocumentInfo[]
   images?: RuntimeImageInfo[]
@@ -108,7 +135,47 @@ export type ChatRuntimePane = {
   foreignRun: ForeignRun | null
   foreignRunFinished: boolean
   refreshingSession: boolean
+  /** T7 access-loss latch: the ONLY writer is markAccessLost; once true it stays true. */
+  accessLost: boolean
+  /** T7: the typed reason of the latch above, retained for the access-lost notice. */
+  accessLostReason: SessionLiveAccessRevokedReason | null
+  /** T7: increments on every members.changed; drives header/dialog participant refreshes. */
+  membersRevision: number
+  /** T7: the single session live SSE stream bound to this pane while it is viewed. */
+  liveStream: SessionLiveStreamHandle | null
+  /** T7: bumped on every bind/teardown; stale stream callbacks compare it. */
+  liveGeneration: number
+  /** T7: authoritative identity used to mint snapshot refreshes after invalidations. */
+  liveAuth: PaneLiveAuth | null
+  /** T7: sequence guard for overlapping authoritative snapshot refreshes. */
+  liveRefreshSeq: number
+  /** T8/T9: authoritative shared-pane flag from detail.access/participant_count. */
+  shared: boolean
+  /** T8: true while a local POST holds this pane's turn before its headers. */
+  localPostPending: boolean
+  /** T8: assistant message_id established by the local POST headers; the pane
+   *  ignores session-SSE execution for that id. Separate from a resumed
+   *  recovery handle. */
+  localPostMessageId: string | null
+  /** T8: transient top-of-conversation notice for a manual-only 409; the ONLY
+   *  writer is notifySessionBusy. Never appended to `messages`. */
+  busyNotice: string | null
+  /** T8: monotonic token so a re-trigger resets the auto-dismiss timer. */
+  busyNoticeToken: number
+  /** T8: pre-header session execution buffer (200 rows / 256 KiB caps). */
+  preHeader: PreHeaderBufferState<SessionLiveExecutionEvent>
+  /** T8: foreign early-turn execution buffer (200 rows / 256 KiB caps, same
+   *  whole-drop policy as preHeader). A foreign frame whose assistant row has
+   *  not merged yet waits here instead of being silently dropped; the
+   *  snapshot flush applies it in stream order. Never appended to `messages`
+   *  directly, so it cannot create a row. */
+  pendingForeign: PreHeaderBufferState<SessionLiveExecutionEvent>
+  /** T8: session-SSE malformed-frame counter; diagnostics only, never UI. */
+  malformedFrameCount: number
 }
+
+/** T7: caller identity captured at bind time for the invalidation snapshot refresh. */
+export type PaneLiveAuth = { userId: string; mainId?: string; authToken?: string | null }
 
 type SendInput = {
   text: string
@@ -121,6 +188,8 @@ type SendInput = {
   authToken: string | null
   userId: string | null
   mainId: string | null
+  /** T8: authenticated viewer identity for the optimistic user row. */
+  viewerAuthor: ChatMessageAuthor | null
   locale: 'zh' | 'en'
   timezone: string
 }
@@ -149,6 +218,7 @@ const state = reactive({
 })
 
 let localSeq = 0
+let runtimeCallbacks: RuntimeCallbacks = {}
 let messageSeq = 0
 const MAX_CACHED_PANES = 8
 
@@ -200,6 +270,21 @@ function createPane(input: { key?: string; sessionId: string | null; messages?: 
     foreignRun: null,
     foreignRunFinished: false,
     refreshingSession: false,
+    accessLost: false,
+    accessLostReason: null,
+    membersRevision: 0,
+    liveStream: null,
+    liveGeneration: 0,
+    liveAuth: null,
+    liveRefreshSeq: 0,
+    shared: false,
+    localPostPending: false,
+    localPostMessageId: null,
+    busyNotice: null,
+    busyNoticeToken: 0,
+    preHeader: createPreHeaderBufferState<SessionLiveExecutionEvent>(),
+    pendingForeign: createPreHeaderBufferState<SessionLiveExecutionEvent>(),
+    malformedFrameCount: 0,
   }
 }
 
@@ -228,6 +313,7 @@ function activePane() {
 function setActivePane(pane: ChatRuntimePane) {
   pane.lastActivatedAt = Date.now()
   state.activeKey = pane.key
+  syncPaneLiveStream()
 }
 
 function pruneInactivePanes() {
@@ -247,7 +333,11 @@ function pruneInactivePanes() {
     keepBySession.add(pane.key)
   }
 
-  state.panes = state.panes.filter((pane) => mustKeep.has(pane.key) || keepBySession.has(pane.key))
+  const kept = state.panes.filter((pane) => mustKeep.has(pane.key) || keepBySession.has(pane.key))
+  for (const pane of state.panes) {
+    if (!kept.includes(pane)) stopPaneLiveStream(pane)
+  }
+  state.panes = kept
 }
 
 function clearUnread(sessionId: string | null) {
@@ -297,17 +387,256 @@ function resolvePaneSession(pane: ChatRuntimePane, sessionId: string, callbacks:
     if (!keeper.activeAssistantMessageId && removed.activeAssistantMessageId) keeper.activeAssistantMessageId = removed.activeAssistantMessageId
     if (!keeper.activeIntervention && removed.activeIntervention) keeper.activeIntervention = removed.activeIntervention
     if (!keeper.authResumeController && removed.authResumeController) keeper.authResumeController = removed.authResumeController
+    if (!keeper.liveAuth && removed.liveAuth) keeper.liveAuth = removed.liveAuth
     if (state.activeKey === removed.key) state.activeKey = keeper.key
+    stopPaneLiveStream(removed)
     state.panes = state.panes.filter((item) => item !== removed)
     callbacks.onSessionResolved?.(sessionId)
+    if (state.activeKey === keeper.key) startPaneLiveStream(keeper)
     return
   }
   pane.sessionId = sessionId
   callbacks.onSessionResolved?.(sessionId)
+  syncPaneLiveStream()
+}
+
+function stopPaneLiveStream(pane: ChatRuntimePane) {
+  pane.liveGeneration += 1
+  const handle = pane.liveStream
+  pane.liveStream = null
+  handle?.stop()
+  noteSessionLiveData(pane.key)
+}
+
+function paneLiveCallbackValid(pane: ChatRuntimePane, generation: number, sessionId: string) {
+  return findPaneByKey(pane.key) === pane && pane.liveGeneration === generation && pane.sessionId === sessionId
+}
+
+async function refreshPaneLiveState(pane: ChatRuntimePane, generation: number, sessionId: string, reopen: boolean) {
+  const auth = pane.liveAuth
+  if (!auth || !paneLiveCallbackValid(pane, generation, sessionId)) return
+  const sequence = pane.liveRefreshSeq + 1
+  pane.liveRefreshSeq = sequence
+  let detail: SessionDetail
+  try {
+    detail = await getSession(sessionId, auth.userId, auth.mainId, auth.authToken)
+  } catch {
+    return
+  }
+  if (!paneLiveCallbackValid(pane, generation, sessionId) || pane.liveRefreshSeq !== sequence) return
+  if (detail.execution_location) pane.executionLocation = detail.execution_location
+  if (detail.runtime_preset_id) pane.runtimePresetId = detail.runtime_preset_id
+  if (detail.model_instance_id !== undefined && detail.model_instance_id !== null) pane.modelInstanceId = detail.model_instance_id
+  if (detail.code_project !== undefined) pane.codeProject = detail.code_project
+  pane.shared = detail.access === 'shared' || (detail.participant_count ?? 0) > 0
+  pane.messages = mergeAuthoritativeMessages(pane.messages, detail.messages || []).messages
+  // T8: the snapshot may have materialized rows for early foreign frames;
+  // apply them in stream order (event_id-deduped, rows are never created here).
+  flushPendingForeignExecutions(pane)
+  await refreshAfterRun(runtimeCallbacks, sessionId)
+  if (!reopen || !paneLiveCallbackValid(pane, generation, sessionId)) return
+  // T6 contract: every control invalidation counts toward the three-frame cap,
+  // even when the authoritative payload carries no cursor to reopen from.
+  const delay = noteSessionLiveControlFrame(pane.key)
+  if (delay > 0) await new Promise<void>((resolve) => { setTimeout(resolve, delay) })
+  const handle = pane.liveStream
+  const cursor = typeof detail.live_cursor === 'string' && detail.live_cursor ? detail.live_cursor : null
+  if (!handle || !cursor) return
+  if (pane.liveStream !== handle || !paneLiveCallbackValid(pane, generation, sessionId)) return
+  handle.openFreshStream(cursor)
+}
+
+/**
+ * T8 removed-member 404: a 401/404/410 close carries no revocable frame, so
+ * the pane probes readability exactly once — an unreadable session latches
+ * access loss, a readable one reopens fresh. Never loops, never toasts; the
+ * transport owns reconnect.
+ */
+async function handlePaneLiveStreamError(
+  pane: ChatRuntimePane,
+  generation: number,
+  sessionId: string,
+  status: number,
+) {
+  if (!paneLiveCallbackValid(pane, generation, sessionId)) return
+  if (status !== 401 && status !== 404 && status !== 410) return
+  const auth = pane.liveAuth
+  if (!auth) return
+  let detail: SessionDetail | null = null
+  try {
+    detail = await getSession(sessionId, auth.userId, auth.mainId, auth.authToken)
+  } catch {
+    detail = null
+  }
+  if (!paneLiveCallbackValid(pane, generation, sessionId)) return
+  if (!detail) {
+    markAccessLost(pane.key, 'participant_removed')
+    return
+  }
+  const handle = pane.liveStream
+  if (!handle) return
+  const cursor = typeof detail.live_cursor === 'string' && detail.live_cursor ? detail.live_cursor : null
+  if (cursor) {
+    handle.openFreshStream(cursor)
+    return
+  }
+  // Readable but cursorless: cold re-attach instead of parking on the dead handle.
+  stopPaneLiveStream(pane)
+  startPaneLiveStream(pane)
+}
+
+function startPaneLiveStream(pane: ChatRuntimePane) {
+  if (pane.liveStream) return
+  if (!pane.sessionId || !pane.liveAuth || pane.accessLost) return
+  if (pane.key !== state.activeKey) return
+  const sessionId = pane.sessionId
+  const generation = pane.liveGeneration + 1
+  pane.liveGeneration = generation
+  // T8: the transport settles after a terminal HTTP error, so at most one
+  // onError fires per close; the flag guards even that single call.
+  let errorSuspicionFired = false
+  const refresh = (reopen: boolean) => {
+    void refreshPaneLiveState(pane, generation, sessionId, reopen).catch(() => undefined)
+  }
+  const liveProgress = () => {
+    if (!paneLiveCallbackValid(pane, generation, sessionId)) return false
+    noteSessionLiveData(pane.key)
+    return true
+  }
+  const handle = startSessionLiveStream({
+    sessionId,
+    paneKey: pane.key,
+    authToken: pane.liveAuth.authToken,
+    onThreadChanged: () => { refresh(true) },
+    onMembersChanged: (paneKey) => {
+      // members.changed is a CONTROL frame: it counts toward the cap (inside
+      // the control-frame refresh) and must not reset the streak via liveProgress.
+      if (!paneLiveCallbackValid(pane, generation, sessionId)) return
+      notifyMembersChanged(paneKey)
+      refresh(true)
+    },
+    onTurnStarted: () => { if (liveProgress()) refresh(false) },
+    onExecution: (event) => { if (liveProgress()) consumeSessionExecution(pane, event) },
+    onTurnCompleted: () => { if (liveProgress()) refresh(false) },
+    onAccessLost: (paneKey, reason) => markAccessLost(paneKey, reason),
+    // T8: malformed frames count diagnostics only — no UI surface.
+    onMalformedFrame: () => { pane.malformedFrameCount += 1 },
+    onError: (error) => {
+      if (errorSuspicionFired) return
+      errorSuspicionFired = true
+      void handlePaneLiveStreamError(pane, generation, sessionId, error.status).catch(() => undefined)
+    },
+  })
+  pane.liveStream = markRaw(handle)
+}
+
+function syncPaneLiveStream() {
+  const active = activePane()
+  for (const pane of state.panes) {
+    if (pane !== active && pane.liveStream) stopPaneLiveStream(pane)
+  }
+  if (active) startPaneLiveStream(active)
+}
+
+/** T7: bump the pane's membersRevision on members.changed; never a fetch. */
+function notifyMembersChanged(paneKey: string) {
+  const pane = findPaneByKey(paneKey)
+  if (pane) pane.membersRevision += 1
+}
+
+/** T7: pane-scoped counter by session id for the single-instance header call site. */
+function membersRevisionFor(sessionId: string | null): number {
+  if (!sessionId) return 0
+  const pane = findPaneBySessionId(sessionId)
+  return pane ? pane.membersRevision : 0
+}
+
+/**
+ * T7 access-loss latch — the ONLY writer of `accessLost`. Exactly once per pane
+ * key it aborts the session SSE stream, the local POST handle, and the recovery
+ * controller; later calls for the same key are no-ops that never touch an
+ * already-aborted handle. T8's POST path calls this same action; T10 only reads
+ * the flag.
+ */
+function markAccessLost(paneKey: string, reason: SessionLiveAccessRevokedReason) {
+  const pane = findPaneByKey(paneKey)
+  if (!pane || pane.accessLost) return
+  pane.accessLost = true
+  pane.accessLostReason = reason
+  stopPaneLiveStream(pane)
+  pane.activeStream?.abort()
+  pane.activeStream = null
+  pane.abortController?.abort()
+  pane.abortController = null
+  pane.authResumeController?.abort()
+  pane.authResumeController = null
 }
 
 function ensureExecV3(msg: RuntimeMessage): ExecutionStoreV3 {
   return ensureMessageExecutionV3(msg)
+}
+
+/** Apply one V3 event to a message row; false when it was a duplicate. */
+function applyExecutionEventToMessage(
+  pane: ChatRuntimePane,
+  msg: RuntimeMessage,
+  ev: ExecutionEventV3,
+): boolean {
+  if (!isExecutionEventV3(ev)) return false
+  const store = ensureExecV3(msg)
+  const before = store.state.rawEvents.length
+  store.applyEvent(ev)
+  if (store.state.rawEvents.length === before) return false
+  applyAssistantContentEvent(msg, ev)
+  const transition = browserInterventionTransition(ev)
+  if (transition.kind === 'cleared') pane.activeIntervention = null
+  if (transition.kind === 'activated') pane.activeIntervention = transition.intervention
+  return true
+}
+
+/** T8 ownership: session-SSE execution is buffered until the local POST's
+ *  headers exist, then foreign frames are consumed while the POST's own
+ *  frames (same message_id) stay ignored. A foreign frame whose assistant
+ *  row has not merged yet waits in pendingForeign for the snapshot flush
+ *  instead of being silently dropped. */
+function consumeSessionExecution(pane: ChatRuntimePane, frame: SessionLiveExecutionEvent) {
+  if (pane.localPostPending && !pane.localPostMessageId) {
+    bufferPreHeaderEvent(pane.preHeader, frame, utf8ByteLength(JSON.stringify(frame)))
+    return
+  }
+  if (shouldIgnoreSessionExecution(pane.localPostMessageId, frame.message_id)) return
+  const target = pane.messages.find(
+    (msg) => msg.role === 'assistant' && msg.message_id === frame.message_id,
+  )
+  if (target) {
+    applyExecutionEventToMessage(pane, target, frame.event)
+    return
+  }
+  bufferPreHeaderEvent(pane.pendingForeign, frame, utf8ByteLength(JSON.stringify(frame)))
+}
+
+/** T8: apply buffered foreign frames to rows the snapshot just merged, in
+ *  stream order. Still-rowless frames are dropped with containment (no UI);
+ *  `messages` itself is never touched, so no duplicate row can appear. */
+function flushPendingForeignExecutions(pane: ChatRuntimePane) {
+  for (const frame of drainPreHeaderEvents(pane.pendingForeign, pane.localPostMessageId)) {
+    const target = pane.messages.find(
+      (msg) => msg.role === 'assistant' && msg.message_id === frame.message_id,
+    )
+    if (target) applyExecutionEventToMessage(pane, target, frame.event)
+  }
+}
+
+/** T8: header arrived — adopt local-POST ownership and flush the pre-header
+ *  buffer, consuming only the foreign frames. */
+function adoptLocalPostMessageId(pane: ChatRuntimePane, messageId: string) {
+  pane.localPostMessageId = messageId
+  for (const frame of drainPreHeaderEvents(pane.preHeader, messageId)) {
+    const target = pane.messages.find(
+      (msg) => msg.role === 'assistant' && msg.message_id === frame.message_id,
+    )
+    if (target) applyExecutionEventToMessage(pane, target, frame.event)
+  }
 }
 
 async function uploadImages(userId: string, files: File[], authToken?: string | null): Promise<UploadedImage[]> {
@@ -340,6 +669,23 @@ function resetPanePreview(pane: ChatRuntimePane) {
   pane.activeIntervention = null
 }
 
+const SESSION_BUSY_NOTICE_MS = 5000
+
+// T8: a manual-only 409 is surfaced as a transient top-of-conversation notice
+// owned by the pane itself — never a thread message, never an error bubble,
+// never a retry or queue. The token makes a re-trigger restart the timer so the
+// notice cannot dismiss early under a newer trigger.
+function notifySessionBusy(pane: ChatRuntimePane, code: string | null) {
+  pane.busyNotice = code === 'session_already_running'
+    ? t('app.chat.session_busy_notice')
+    : t('app.sidebar.session_running')
+  pane.busyNoticeToken += 1
+  const token = pane.busyNoticeToken
+  window.setTimeout(() => {
+    if (pane.busyNoticeToken === token) pane.busyNotice = null
+  }, SESSION_BUSY_NOTICE_MS)
+}
+
 async function sendMessage(key: string, input: SendInput, callbacks: RuntimeCallbacks = {}) {
   const pane = findPaneByKey(key)
   if (!pane) return
@@ -369,6 +715,7 @@ async function sendMessage(key: string, input: SendInput, callbacks: RuntimeCall
   const operationId = pane.operationId
   setPaneRunning(pane, true)
   pane.activeAuthToken = input.authToken
+  pane.liveAuth = { userId: input.userId, mainId: input.mainId, authToken: input.authToken }
   let uploadedImages: UploadedImage[] = []
   let uploadedDocuments: RuntimeDocumentInfo[] = []
   try {
@@ -403,11 +750,19 @@ async function sendMessage(key: string, input: SendInput, callbacks: RuntimeCall
   }
   if (pane.operationId !== operationId) return
 
+  const viewerAuthor: ChatMessageAuthor = input.viewerAuthor ?? {
+    user_id: input.userId || '',
+    display_name: null,
+    avatar_url: null,
+  }
+  const localPostUserMessageId = nextMessageId()
   const userMessage: RuntimeMessage = {
     _id: nextMessageId(),
+    message_id: localPostUserMessageId,
     role: 'user',
     content: text,
-    user_id: input.userId || undefined,
+    user_id: viewerAuthor.user_id || input.userId || undefined,
+    author: viewerAuthor,
     images: uploadedImages as RuntimeImageInfo[],
     documents: uploadedDocuments,
     created_at: new Date().toISOString(),
@@ -433,25 +788,17 @@ async function sendMessage(key: string, input: SendInput, callbacks: RuntimeCall
   const applyAssistantEvent = (ev: ExecutionEventV3, options: { fromBackend?: boolean } = {}) => {
     const msg = pane.messages.find((item) => item._id === assistantMsg._id)
     if (!msg || !isExecutionEventV3(ev)) return
-    const store = ensureExecV3(msg)
-    const before = store.state.rawEvents.length
-    store.applyEvent(ev)
     if (
       options.fromBackend &&
       (ev.type === 'run.completed' || ev.type === 'run.failed' || ev.type === 'run.cancelled')
     ) {
       backendTerminalReceived = true
     }
-    const accepted = store.state.rawEvents.length > before
+    const accepted = applyExecutionEventToMessage(pane, msg, ev)
     if (accepted && options.fromBackend) {
       const sequence = Number(ev.stream_seq_end || ev.stream_seq || 0)
       backendEventCursor = sequence > 0 ? Math.max(backendEventCursor, sequence) : backendEventCursor + 1
     }
-    if (!accepted) return
-    applyAssistantContentEvent(msg, ev)
-    const transition = browserInterventionTransition(ev)
-    if (transition.kind === 'cleared') pane.activeIntervention = null
-    if (transition.kind === 'activated') pane.activeIntervention = transition.intervention
   }
 
   const recoverDisconnectedStream = async (showRecoveryEvent = true): Promise<boolean> => {
@@ -488,6 +835,9 @@ async function sendMessage(key: string, input: SendInput, callbacks: RuntimeCall
     return false
   }
 
+  pane.localPostPending = true
+  pane.localPostMessageId = null
+  pane.preHeader = createPreHeaderBufferState<SessionLiveExecutionEvent>()
   try {
     const handle = startChatStream(
       {
@@ -513,6 +863,7 @@ async function sendMessage(key: string, input: SendInput, callbacks: RuntimeCall
       },
       {
         authToken: input.authToken,
+        userMessageId: localPostUserMessageId,
         onSessionId: (sid) => {
           if (input.modelId) pane.modelInstanceId = input.modelId
           assistantMsg._backendSid = sid
@@ -520,6 +871,13 @@ async function sendMessage(key: string, input: SendInput, callbacks: RuntimeCall
         },
         onMessageId: (mid) => {
           assistantMsg.message_id = mid
+          adoptLocalPostMessageId(pane, mid)
+        },
+        onUserMessageId: (mid) => {
+          applyEffectiveUserMessageId(userMessage, mid)
+        },
+        onAccessRevoked: (event) => {
+          markAccessLost(pane.key, event.reason)
         },
       },
     )
@@ -527,7 +885,11 @@ async function sendMessage(key: string, input: SendInput, callbacks: RuntimeCall
     pane.activeStream = handle
     ctrl.signal.addEventListener('abort', () => handle.abort())
     await handle.done
-    if (!ctrl.signal.aborted && !backendTerminalReceived) {
+    if (!backendTerminalReceived && shouldReleaseToDurableRecovery({
+      accessLost: pane.accessLost,
+      paneAlive: findPaneByKey(pane.key) === pane,
+      aborted: ctrl.signal.aborted,
+    })) {
       // A proxy may close a streaming response cleanly. Verify the backend run
       // reached a terminal state instead of treating EOF as task completion.
       await recoverDisconnectedStream(true)
@@ -563,17 +925,20 @@ async function sendMessage(key: string, input: SendInput, callbacks: RuntimeCall
       })
     }
   } catch (error: any) {
-    if (error instanceof ChatStreamHttpError && error.status === 409 && error.code === SESSION_ALREADY_RUNNING) {
-      // Concurrent run holds the session (server 409). Remove BOTH optimistic
-      // bubbles (the pair pushed above), inform the viewer neutrally, and leave
-      // the composer enabled for a later retry — never an error bubble.
-      // message_sequence_conflict and generic failures fall through to the
-      // normal error path below.
-      pane.messages = pane.messages.filter(
-        (item) => item._id !== userMessage._id && item._id !== assistantMsg._id,
-      )
+    if (error instanceof ChatStreamHttpError && error.status === 409 && isManualOnlyConflict(error.code)) {
+      // Manual-only 409 (concurrent run or rejected user-message id): remove
+      // BOTH optimistic bubbles, show the transient top-of-conversation notice,
+      // and leave the composer enabled for a later retry — never an error
+      // bubble, never an automatic retry, never a queue.
+      pane.messages = withoutMessages(pane.messages, [userMessage._id, assistantMsg._id])
+      // Reconciled 409 trigger: the pane-owned transient busy notice is the
+      // single visible surface for this event (per-pane, auto-dismiss, never
+      // a thread message). input.onRejected restores the composer's draft;
+      // the foreign-run snapshot below keeps main's run-notice accurate.
+      // callbacks.onSessionBusy (global shareToast) is deliberately NOT fired
+      // here to avoid a duplicate surface on the same event.
       input.onRejected?.()
-      callbacks.onSessionBusy?.()
+      notifySessionBusy(pane, error.code)
       if (pane.sessionId && input.userId) {
         try {
           const detail = await getSession(pane.sessionId, input.userId, input.mainId || undefined, input.authToken)
@@ -602,6 +967,9 @@ async function sendMessage(key: string, input: SendInput, callbacks: RuntimeCall
     }
   } finally {
     if (pane.operationId !== operationId) return
+    pane.localPostPending = false
+    pane.localPostMessageId = null
+    pane.preHeader = createPreHeaderBufferState<SessionLiveExecutionEvent>()
     // Transport completion owns the running flag. Clear it before any optional
     // refresh callback so a slow or failed sidebar/billing request can never
     // leave the composer stuck in its loading state.
@@ -639,6 +1007,7 @@ async function stopGeneration(key: string) {
 }
 
 export function useChatRuntimeStore(callbacks: RuntimeCallbacks = {}) {
+  runtimeCallbacks = callbacks
   const panes = computed(() => state.panes)
   const activeChatKey = computed(() => state.activeKey)
   const activeChatPane = computed(() => activePane())
@@ -654,6 +1023,7 @@ export function useChatRuntimeStore(callbacks: RuntimeCallbacks = {}) {
 
   function reset() {
     for (const pane of state.panes) {
+      stopPaneLiveStream(pane)
       pane.activeStream?.abort()
       pane.abortController?.abort()
       pane.authResumeController?.abort()
@@ -675,6 +1045,7 @@ export function useChatRuntimeStore(callbacks: RuntimeCallbacks = {}) {
     clearUnread(sessionId)
     const existing = findPaneBySessionId(sessionId)
     if (existing) {
+      existing.liveAuth = { userId, mainId, authToken }
       setActivePane(existing)
       return existing
     }
@@ -689,6 +1060,8 @@ export function useChatRuntimeStore(callbacks: RuntimeCallbacks = {}) {
     pane.modelInstanceId = detail.model_instance_id || ''
     pane.codeProject = detail.code_project || null
     updateForeignRun(pane, detail.active_run, userId)
+    pane.shared = detail.access === 'shared' || (detail.participant_count ?? 0) > 0
+    pane.liveAuth = { userId, mainId, authToken }
     state.panes = [...state.panes, pane]
     setActivePane(pane)
     pruneInactivePanes()
@@ -791,8 +1164,10 @@ export function useChatRuntimeStore(callbacks: RuntimeCallbacks = {}) {
   }
 
   function removeSession(sessionId: string) {
-    findPaneBySessionId(sessionId)?.authResumeController?.abort()
-    state.panes = state.panes.filter((pane) => pane.sessionId !== sessionId)
+    const pane = findPaneBySessionId(sessionId)
+    if (pane) stopPaneLiveStream(pane)
+    pane?.authResumeController?.abort()
+    state.panes = state.panes.filter((item) => item.sessionId !== sessionId)
     clearUnread(sessionId)
     if (currentSessionId.value === sessionId) {
       startLocalSession()
@@ -875,6 +1250,9 @@ export function useChatRuntimeStore(callbacks: RuntimeCallbacks = {}) {
     syncActiveRuns,
     refreshSession,
     removeSession,
+    markAccessLost,
+    notifyMembersChanged,
+    membersRevisionFor,
     sessionIsRunning,
     sessionIsUnread,
     clearUnread,

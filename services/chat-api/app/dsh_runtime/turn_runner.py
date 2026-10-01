@@ -24,7 +24,10 @@ from app.dsh_runtime.evidence_projection import (
 )
 from app.dsh_runtime.gateway import DshAgentKernelGateway
 from app.dsh_runtime.profile.service import RuntimeProfilePublisher
-from app.dsh_runtime.turn_finalization import TurnStateFinalizer
+from app.dsh_runtime.turn_finalization import (
+    TurnAssistantProjection,
+    TurnStateFinalizer,
+)
 from app.enterprise_capabilities.evidence import ExecutionEvidenceRepository
 
 
@@ -117,6 +120,12 @@ class DshTurnRunner:
                 user_id=str(binding["user_id"]),
                 message_id=message_id,
             )
+            # Re-baseline BEFORE send: after a resume the host journal is
+            # rebuilt with cursors renumbered from 1, so the durable cursor
+            # may point inside reimported history. Only post-head events flow.
+            attach_after = await self._attach_cursor(binding, message_id)
+            last_native_cursor = max(last_native_cursor, attach_after)
+            skipped_stale = 0
             # Refresh before the first model call so a long-lived Runtime uses
             # the current speaker-scoped credential for usage attribution.
             await credential_lease.refresh_now()
@@ -132,8 +141,14 @@ class DshTurnRunner:
             )
             credential_lease.start()
             async for event in self._gateway.subscribe(
-                str(binding["kernel_session_id"]), int(binding.get("event_cursor") or 0)
+                str(binding["kernel_session_id"]), attach_after
             ):
+                if event.cursor <= attach_after:
+                    # Pre-attach history: never project/persist/deliver it
+                    # and never let its terminal close this turn's stream.
+                    last_native_cursor = max(last_native_cursor, event.cursor)
+                    skipped_stale += 1
+                    continue
                 native_event_count += 1
                 if event.type == "tool.approval.requested":
                     await credential_lease.refresh_now()
@@ -187,12 +202,21 @@ class DshTurnRunner:
                         await self._turn_events.flush(message_id)
                     break
         except asyncio.CancelledError:
+            # Cancellation records intent; the durable writer is NOT aborted
+            # before the coordinator runs, so the finalizer's flush step keeps
+            # every already-queued row and the terminal state stays durable.
             await credential_lease.stop()
-            await writer.abort()
             await self._finish_side_events(message_id)
             try:
                 await self._finalizer.finalize(
-                    binding=binding, message_id=message_id, status="cancelled"
+                    binding=binding,
+                    message_id=message_id,
+                    status="cancelled",
+                    flush=writer.close,
+                    assistant=TurnAssistantProjection(
+                        content=assistant_text,
+                        execution_events=list(history_events),
+                    ),
                 )
             except Exception:
                 logger.exception(
@@ -226,8 +250,8 @@ class DshTurnRunner:
             if terminal_projection is not None:
                 history_events.append(terminal_projection)
         try:
-            if not writer_aborted:
-                await writer.close()
+            if skipped_stale and not writer_aborted:
+                await self._advance_consumed_cursor(binding, message_id, last_native_cursor)
             evidence_bundles: list[dict[str, Any]] = []
             if self._execution_evidence is not None:
                 evidence_bundle = await self._execution_evidence.load(
@@ -254,19 +278,19 @@ class DshTurnRunner:
             side_history = await self._finish_side_events(message_id)
             history_events.extend(side_history)
             history_events.sort(key=lambda row: int(row.get("stream_seq") or 0))
-            await self._conversations.update_assistant_projection(
-                message_id=message_id,
-                tenant_id=str(binding["tenant_id"]),
-                user_id=str(binding["user_id"]),
-                content=assistant_text,
-                execution_events=history_events,
-                evidence_bundles=evidence_bundles,
-            )
+            suspension = browser_intervention if status == "completed" else None
             await self._finalizer.finalize(
                 binding=binding,
                 message_id=message_id,
                 status=status,
-                clear_conversation=browser_intervention is None,
+                clear_conversation=suspension is None,
+                intervention=suspension,
+                flush=None if writer_aborted else writer.close,
+                assistant=TurnAssistantProjection(
+                    content=assistant_text,
+                    execution_events=list(history_events),
+                    evidence_bundles=list(evidence_bundles),
+                ),
             )
         except Exception as exc:
             status = "failed"
@@ -284,14 +308,6 @@ class DshTurnRunner:
                 pass
         finally:
             await credential_lease.stop()
-            if browser_intervention is not None and status == "completed":
-                await self._conversations.suspend_active_run(
-                    conversation_id=str(binding["conversation_id"]),
-                    tenant_id=str(binding["tenant_id"]),
-                    user_id=str(binding["user_id"]),
-                    message_id=message_id,
-                    intervention=browser_intervention,
-                )
             if terminal_projection is not None:
                 live_stream.publish(terminal_projection)
             live_stream.finish()
@@ -305,6 +321,37 @@ class DshTurnRunner:
                 delta_count=delta_count,
             )
         return status
+
+    async def _attach_cursor(self, binding: dict[str, Any], message_id: str) -> int:
+        durable = int(binding.get("event_cursor") or 0)
+        probe = getattr(self._gateway, "head_cursor", None)
+        if probe is None:
+            return durable
+        try:
+            return max(int(await probe(str(binding["kernel_session_id"]))), 0)
+        except Exception:
+            logger.warning(
+                "DSH head probe failed; attaching at the durable cursor",
+                extra={"event": "dsh.turn.head_probe_fallback", "message_id": message_id},
+            )
+            return durable
+
+    async def _advance_consumed_cursor(
+        self, binding: dict[str, Any], message_id: str, cursor: int
+    ) -> None:
+        if cursor <= 0:
+            return
+        try:
+            await self._bindings.advance_cursor(str(binding["binding_id"]), int(cursor))
+        except Exception:
+            logger.warning(
+                "failed to advance DSH binding cursor",
+                extra={
+                    "event": "dsh.turn.cursor_advance_failed",
+                    "message_id": message_id,
+                    "cursor": int(cursor),
+                },
+            )
 
     async def _publish_kernel(
         self,

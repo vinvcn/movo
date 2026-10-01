@@ -22,6 +22,7 @@ import ArtifactList from './execution/ArtifactList.vue'
 import EvidenceDrawer from './execution/EvidenceDrawer.vue'
 import KnowledgeSourceViewer from './execution/KnowledgeSourceViewer.vue'
 import UserMessageActions from './chat/UserMessageActions.vue'
+import UserMessageAuthor from './chat/UserMessageAuthor.vue'
 import type { ArtifactItem, EvidenceBundleItem, EvidenceSourceItem } from '../features/execution-v3/domain/delivery'
 import { evidenceSourceStats } from '../features/execution-v3/domain/evidenceSourceGroups'
 import { resolvePermission } from '../composables/useChatStream'
@@ -40,6 +41,7 @@ import { capabilities } from '../platform'
 import type { DesktopToolLauncherKind, DesktopToolTab } from './desktop/desktopToolTabs'
 import type { AgentPolicySnapshot } from '../api/auth'
 import { listSessionParticipants } from '../api/sessionSharing'
+import type { ChatMessageAuthor } from '../api/sessions'
 import { resolveArtifactIcon, resolveArtifactPresentation } from '../registries'
 import { resolveArtifactKind } from '../features/execution-v3/domain/artifactKind'
 import { authenticatedJsonHeaders } from '../api/authHeaders'
@@ -70,6 +72,14 @@ const props = defineProps<{
   foreignRunFinished?: boolean
   refreshingSession?: boolean
   stopping?: boolean
+  /** T8: transient top-of-conversation notice for a manual-only concurrent-send
+   *  409; the store owns the auto-dismiss timer and this never enters the
+   *  message thread. */
+  busyNotice?: string | null
+  /** T9: authoritative shared-session flag wired from `pane.shared` in App.vue.
+   *  When true, user rows render author avatar + display name through the
+   *  focused UserMessageAuthor child (architecture boundary above). */
+  shared?: boolean
   codeWorkspace?: DshWorkspace | null
   codeWorkspaces?: readonly DshWorkspace[]
   codeWorkspacesLoading?: boolean
@@ -160,6 +170,9 @@ interface Message {
   /** Message author (todo 28): present on session-GET messages, the viewer's
    *  own user_id on optimistic pushes. Absent (legacy/system) renders as today. */
   user_id?: string
+  /** T5/T9: authoritative author projection (`{user_id, display_name,
+   *  avatar_url} | null`) consumed verbatim when rendering shared rows. */
+  author?: ChatMessageAuthor | null
   /** Persisted V3 events returned by GET /sessions/{id} for replay. */
   execution_events?: unknown[]
   trigger_source?: string
@@ -341,6 +354,22 @@ const foreignRunSpeakerName = computed(() => {
   const name = props.sessionId ? memberNamesBySession.value.get(props.sessionId)?.get(id)?.trim() : ''
   return name || t('session.run.another_member')
 })
+// T9: shared-session author identity for owner, participant, and viewer rows.
+// The authoritative server projection wins; the participant-name cache above is
+// the legacy fallback, then a short id. `authorLabel` stays untouched for the
+// solo-session path.
+function sharedAuthorName(msg: Message): string | null {
+  const projected = msg.author?.display_name?.trim()
+  if (projected) return projected
+  const id = msg.user_id || ''
+  const known = props.sessionId ? memberNamesBySession.value.get(props.sessionId)?.get(id)?.trim() : undefined
+  if (known) return known
+  return id ? id.slice(0, 8) : null
+}
+
+function sharedAuthorAvatar(msg: Message): string | null {
+  return msg.author?.avatar_url ?? null
+}
 
 const imagePreviewOpen = ref(false)
 const imagePreviewSrc = ref('')
@@ -2015,6 +2044,33 @@ function formatErrorMessage(raw: string): string {
     <div 
       class="relative flex h-full min-w-0 flex-1 flex-col"
     >
+    <!-- T8: transient concurrent-send notice, in-flow at the top of the
+         conversation (never covering messages, never a thread row). The store
+         owns the auto-dismiss timer; this is display-only. -->
+    <Transition
+      enter-active-class="transition duration-200 ease-out"
+      enter-from-class="opacity-0 -translate-y-1"
+      enter-to-class="opacity-100 translate-y-0"
+      leave-active-class="transition duration-150 ease-in"
+      leave-from-class="opacity-100 translate-y-0"
+      leave-to-class="opacity-0 -translate-y-1"
+    >
+      <div
+        v-if="props.busyNotice"
+        class="w-full max-w-4xl mx-auto px-4 md:px-6 pt-3 shrink-0"
+        role="status"
+        aria-live="polite"
+      >
+        <div class="flex items-start gap-2.5 rounded-xl border border-gray-200 bg-blue-50 px-3.5 py-2.5 text-sm text-slate-700">
+          <svg class="mt-0.5 h-4 w-4 shrink-0 text-blue-500" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <circle cx="12" cy="12" r="10" />
+            <path d="M12 16v-4" />
+            <path d="M12 8h.01" />
+          </svg>
+          <span class="min-w-0">{{ props.busyNotice }}</span>
+        </div>
+      </div>
+    </Transition>
     <!-- Messages Area -->
     <div
       ref="messagesContainer"
@@ -2125,7 +2181,14 @@ function formatErrorMessage(raw: string): string {
               </div>
             </template>
             <template v-else>
-              <div v-if="authorLabel(msg)" class="mb-1 px-1 text-xs font-medium text-slate-500">{{ authorLabel(msg) }}</div>
+              <UserMessageAuthor
+                v-if="props.shared"
+                class="mb-1 px-1"
+                :class="isOwnMessage(msg) ? 'justify-end' : ''"
+                :display-name="sharedAuthorName(msg)"
+                :avatar-url="sharedAuthorAvatar(msg)"
+              />
+              <div v-else-if="authorLabel(msg)" class="mb-1 px-1 text-xs font-medium text-slate-500">{{ authorLabel(msg) }}</div>
               <div class="rounded-2xl rounded-br-sm bg-blue-50 p-4 shadow-sm">
                 <div v-if="msg.trigger_source === 'scheduled'" class="mb-2 inline-flex items-center gap-1.5 rounded-full bg-blue-100 px-2 py-1 text-xs font-medium text-blue-700">
                   <svg viewBox="0 0 24 24" class="h-3.5 w-3.5" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>

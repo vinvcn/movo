@@ -23,6 +23,7 @@
       :show="shareDialogOpen"
       :mode="viewerMode"
       :session-id="sessionId"
+      :members-revision="refreshToken"
       @update:show="shareDialogOpen = $event"
       @removed="reloadDetail"
       @revoked="reloadDetail"
@@ -45,6 +46,10 @@ const props = defineProps<{
   userId: string
   mainId: string
   authToken: string | null
+  /** T7 re-entrancy: the store's membersRevision for this session; a change
+   *  refetches the authoritative detail so the participant count repaints on
+   *  members.changed. Optional so desktop/other embedders stay valid. */
+  refreshToken?: number
 }>()
 
 // T24 wiring: left hands off to the parent (App.vue), which clears the leaved
@@ -72,6 +77,12 @@ watch(() => props.sessionId, (sessionId) => {
   if (!sessionId) return
   void loadDetail(sessionId)
 }, { immediate: true })
+
+// T7: the membersRevision edge — the store bumps refreshToken on members.changed
+// and this component owns its detail fetch, so the repaint happens here.
+watch(() => props.refreshToken, () => {
+  if (props.sessionId) void loadDetail(props.sessionId)
+})
 
 async function loadDetail(sessionId: string) {
   const sequence = detailSequence

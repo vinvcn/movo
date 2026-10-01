@@ -60,6 +60,26 @@ class MessageSequenceConflict(RuntimeError):
         )
 
 
+class UserMessageIdConflict(RuntimeError):
+    """A client-supplied user-message id already exists in ``chat_messages``.
+
+    Session-sharing realtime plan todo 4: a client id is an identity claim, so
+    ANY existing row carrying it - same scope or not - is this stable,
+    non-500 conflict. A collision on a SERVER-minted id keeps the repository's
+    idempotent re-delivery return; only ``client_supplied_id=True`` rejects it.
+    """
+
+    code = "user_message_id_conflict"
+
+    def __init__(self, *, conversation_id: str, message_id: str) -> None:
+        self.conversation_id = conversation_id
+        self.message_id = message_id
+        super().__init__(
+            f"user message id {message_id!r} already exists in chat_messages;"
+            " supply a fresh turn identity"
+        )
+
+
 class ConversationRepository:
     def __init__(self, db: Any) -> None:
         self._sessions = db.chat_sessions
@@ -218,6 +238,70 @@ class ConversationRepository:
         cursor = self._messages.find(query, sort=[("seq", 1)])
         return await cursor.to_list(length=None)
 
+    async def backfill_message_sequences(self, tenant_id: str, session_id: str) -> int:
+        """Persist session ``seq`` ordinals onto historical unsequenced rows.
+
+        ALL-OR-NOTHING PER SESSION: a cheap read-only pre-check counts the
+        session's sequenced rows through the pre-existing unique
+        :data:`UNIQUE_MESSAGE_SEQ_INDEX_NAME` index and the backfill runs
+        ONLY when that count is zero AND unsequenced rows exist. A MIXED
+        session is therefore left completely untouched (the endpoint serves
+        it through the degrade path instead), the steady state costs one
+        extra indexed read and takes no write lock, and a partially
+        completed backfill is safely resumable.
+
+        Values are computed in ``(created_at asc, _id asc)`` order from the
+        session's monotonic ``next_message_seq`` counter (never rewound) and
+        written as SEPARATE single-document updates that only ever match a
+        row whose ``seq`` is still absent - so two concurrent backfills can
+        never assign the same ordinal. Stored ``content`` is never touched
+        and no ``seq`` is ever numbered at read time. Returns the number of
+        rows actually written.
+        """
+        if not ObjectId.is_valid(session_id):
+            return 0
+        session_oid = ObjectId(session_id)
+        scope = {"main_id": tenant_id, "session_id": session_oid}
+        # Sequenced probe: the (main_id, session_id, seq) index bounds this
+        # count; a null/missing seq is type-bracketed out of the $gte range.
+        sequenced = await self._messages.count_documents({**scope, "seq": {"$gte": 0}})
+        if sequenced:
+            return 0
+        pending = await self._messages.find(
+            {**scope, "seq": None}, sort=[("created_at", 1), ("_id", 1)]
+        ).to_list(length=None)
+        if not pending:
+            return 0
+        assigned = 0
+        for row in pending:
+            # The same $max floor as append_message: a legacy writer that
+            # advanced seq without advancing the counter cannot rewind it.
+            session = await self._sessions.find_one_and_update(
+                {"_id": session_oid, "main_id": tenant_id},
+                [
+                    {
+                        "$set": {
+                            "next_message_seq": {
+                                "$max": [
+                                    {"$add": [{"$ifNull": ["$next_message_seq", 0]}, 1]},
+                                    1,
+                                ]
+                            }
+                        }
+                    }
+                ],
+                return_document=ReturnDocument.AFTER,
+            )
+            if session is None:
+                raise LookupError("conversation_not_found")
+            seq = int(session.get("next_message_seq") or 1)
+            result = await self._messages.update_one(
+                {**scope, "_id": row["_id"], "seq": None},
+                {"$set": {"seq": seq}},
+            )
+            assigned += int(result.modified_count)
+        return assigned
+
     async def append_message(
         self,
         *,
@@ -230,9 +314,18 @@ class ConversationRepository:
         images: list[dict[str, Any]] | None = None,
         documents: list[dict[str, Any]] | None = None,
         execution_events: list[dict[str, Any]] | None = None,
+        client_supplied_id: bool = False,
     ) -> dict[str, Any]:
         existing = await self._messages.find_one({"message_id": message_id})
         if existing is not None:
+            if client_supplied_id:
+                # Plan todo 4: the client's X-User-Message-Id is an identity
+                # claim, so an existing row is a conflict even in the same
+                # scope - never the server-minted path's silent idempotent
+                # return below.
+                raise UserMessageIdConflict(
+                    conversation_id=conversation_id, message_id=message_id
+                )
             if (
                 str(existing.get("main_id")) != tenant_id
                 or str(existing.get("user_id")) != user_id
@@ -292,6 +385,10 @@ class ConversationRepository:
         except DuplicateKeyError:
             existing = await self._messages.find_one({"message_id": message_id})
             if existing is not None:
+                if client_supplied_id:
+                    raise UserMessageIdConflict(
+                        conversation_id=conversation_id, message_id=message_id
+                    ) from None
                 return existing
             # Not the message-id idempotency case: a concurrent writer took
             # the same (main_id, session_id, seq) slot. Typed and retryable,
