@@ -49,7 +49,7 @@ class ModelGatewayFailure(RuntimeError):
         self.retryable = retryable
 
 
-ClientFactory = Callable[[str, str, ModelGatewayRequest, str], Awaitable[BaseLLMClient]]
+ClientFactory = Callable[[str, str, ModelGatewayRequest, str, str], Awaitable[BaseLLMClient]]
 
 
 class ModelGatewayService:
@@ -63,7 +63,9 @@ class ModelGatewayService:
     ) -> ModelGatewayResponse:
         self._validate_scope(request, claims)
         try:
-            client = await self._client_factory(claims.model_instance_id, claims.tenant_id, request, claims.user_id)
+            client = await self._client_factory(
+                claims.model_instance_id, claims.tenant_id, request, claims.user_id, claims.digital_employee_id
+            )
             messages = self._messages(request)
             kwargs: dict[str, Any] = {}
             if request.maxTokens:
@@ -102,7 +104,9 @@ class ModelGatewayService:
         """Prepare an authenticated provider stream and expose incremental chunks."""
         self._validate_scope(request, claims)
         try:
-            client = await self._client_factory(claims.model_instance_id, claims.tenant_id, request, claims.user_id)
+            client = await self._client_factory(
+                claims.model_instance_id, claims.tenant_id, request, claims.user_id, claims.digital_employee_id
+            )
         except ModelConfigError as exc:
             raise ModelGatewayFailure(
                 "model_configuration_invalid", self._safe_message(exc), retryable=False
@@ -170,6 +174,7 @@ class ModelGatewayService:
         tenant_id: str,
         request: ModelGatewayRequest,
         user_id: str,
+        digital_employee_id: str = "",
     ) -> BaseLLMClient:
         config = await get_model_config(model_instance_id, tenant_id)
         if config is None:
@@ -182,6 +187,9 @@ class ModelGatewayService:
             output_spec={
                 "main_id": tenant_id,
                 "user_id": user_id,
+                # Attributed next to the speaking user; empty for personal
+                # sessions (docs/digital-employee.md, Cost attribution).
+                "digital_employee_id": digital_employee_id,
                 "model_instance_id": model_instance_id,
                 "session_id": request.sessionId or "",
                 "profile_version": request.profileVersion,

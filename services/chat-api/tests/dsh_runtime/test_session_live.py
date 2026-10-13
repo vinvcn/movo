@@ -2173,6 +2173,7 @@ def test_t3_restart_sweep_finalizes_orphaned_claim_and_admits_next_send(
     assert binding["active_turn"]["claim_state"] == "running"
 
     import app.dsh_runtime.application as application_module
+    from app.core.config import get_settings
     from app.dsh_runtime.application import DshRuntimeApplication
     from app.dsh_runtime.gateway import DshAgentKernelGateway
     from app.dsh_runtime.profile.store import MongoRuntimeProfileStore
@@ -2209,6 +2210,14 @@ def test_t3_restart_sweep_finalizes_orphaned_claim_and_admits_next_send(
     monkeypatch.setattr(AuthoritativeDeliveryRepository, "ensure_indexes", noop_async)
 
     app = DshRuntimeApplication()
+    # ModelGatewayTokenService (and ToolGatewayTokenService) now require a
+    # >=16-char signing secret; provide one for the application bootstrap.
+    monkeypatch.setattr(
+        get_settings(),
+        "DSH_MODEL_GATEWAY_SIGNING_SECRET",
+        "test-model-gateway-signing-secret",
+        raising=False,
+    )
     harness.run(app.start())
     try:
         current = _t3_binding(harness, session_id)

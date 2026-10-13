@@ -1001,22 +1001,95 @@ class ExternalToolRegistry:
                 ]
             else:
                 discovered_tools = []
-            descriptors.append(
-                {
-                    "id": tool["id"],
-                    "name": tool["name"],
-                    "type": tool["type"],
-                    "description": tool["description"],
-                    "usageHint": tool["usageHint"],
-                    "tags": tool["tags"],
-                    "config": config,
-                    "inputSchema": _safe_list(config.get("inputSchema")),
-                    "outputSchema": _safe_list(config.get("outputSchema")),
-                    "resultPath": str(config.get("resultPath") or ""),
-                    "discoveredTools": discovered_tools,
-                }
-            )
+            descriptors.append(self._descriptor(tool, config, discovered_tools))
         return descriptors
+
+    async def list_bound_descriptors(
+        self, main_id: str = "default", *, bindings: List[Dict[str, Any]]
+    ) -> List[Dict[str, Any]]:
+        """Employee bundle mode (docs/digital-employee.md): descriptors for
+        EXACTLY the bound organization tools, each binding optionally
+        narrowing an MCP server to a subset of its discovered tool names.
+
+        Bound ids that are missing or disabled - and MCP names lost in a
+        re-discovery - are skipped with a warning (reference hygiene), never
+        a hard failure. The speaker's own visibility is deliberately not
+        re-applied: the employee's assignment is the grant.
+        """
+        ordered_ids = list(dict.fromkeys(
+            str(binding.get("tool_id") or "").strip()
+            for binding in bindings
+            if str(binding.get("tool_id") or "").strip()
+        ))
+        if not ordered_ids:
+            return []
+        subsets: Dict[str, set] = {}
+        for binding in bindings:
+            tool_id = str(binding.get("tool_id") or "").strip()
+            if not tool_id:
+                continue
+            subsets[tool_id] = {
+                str(name).strip()
+                for name in (binding.get("enabled_tool_names") or [])
+                if str(name).strip()
+            }
+        tools = await external_tool_service.list(main_id, enabled_only=True, scope="organization")
+        by_id = {str(tool.get("id") or ""): tool for tool in tools}
+        descriptors: List[Dict[str, Any]] = []
+        for tool_id in ordered_ids:
+            tool = by_id.get(tool_id)
+            if tool is None:
+                logger.warning(
+                    "digital_employee_bound_tool_missing main_id=%s tool_id=%s",
+                    main_id, tool_id,
+                )
+                continue
+            config = _safe_dict(tool.get("config"))
+            subset = subsets.get(tool_id) or set()
+            if tool["type"] == "mcp":
+                enabled = enabled_mcp_tool_names(config)
+                if subset:
+                    resolved = [name for name in enabled if name in subset]
+                    lost = subset.difference(resolved)
+                    if lost:
+                        logger.warning(
+                            "digital_employee_bound_tool_names_missing main_id=%s tool_id=%s names=%s",
+                            main_id, tool_id, ",".join(sorted(lost)),
+                        )
+                    enabled = resolved
+                if not enabled or len(enabled) > MCP_ENABLED_TOOL_LIMIT:
+                    logger.warning(
+                        "digital_employee_bound_tool_skipped main_id=%s tool_id=%s enabled_tool_count=%s",
+                        main_id, tool_id, len(enabled),
+                    )
+                    continue
+                enabled_set = set(enabled)
+                discovered_tools = [
+                    item for item in _safe_list(tool.get("discoveredTools"))
+                    if isinstance(item, dict) and str(item.get("name") or "").strip() in enabled_set
+                ]
+            else:
+                discovered_tools = []
+            descriptors.append(self._descriptor(tool, config, discovered_tools))
+        return descriptors
+
+    @staticmethod
+    def _descriptor(
+        tool: Dict[str, Any], config: Dict[str, Any], discovered_tools: List[Dict[str, Any]]
+    ) -> Dict[str, Any]:
+        return {
+            "id": tool["id"],
+            "name": tool["name"],
+            "type": tool["type"],
+            "description": tool["description"],
+            "usageHint": tool["usageHint"],
+            "tags": tool["tags"],
+            "config": config,
+            "inputSchema": _safe_list(config.get("inputSchema")),
+            "outputSchema": _safe_list(config.get("outputSchema")),
+            "resultPath": str(config.get("resultPath") or ""),
+            "discoveredTools": discovered_tools,
+        }
 
 
 external_tool_registry = ExternalToolRegistry()

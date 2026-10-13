@@ -12,7 +12,11 @@ from app.dsh_runtime.events.persistence_retry import (
     is_retryable_persistence_error,
     retry_persistence,
 )
-from app.dsh_runtime.events.repository import KernelEventRepository, KernelEventWrite
+from app.dsh_runtime.events.repository import (
+    MESSAGE_STREAM_COUNTER,
+    KernelEventRepository,
+    KernelEventWrite,
+)
 
 
 def test_transient_failure_is_retried_until_success() -> None:
@@ -91,6 +95,14 @@ def test_partial_batch_success_replays_both_idempotent_collections() -> None:
                 self.calls += 1
                 if self.fail_first and self.calls == 1:
                     raise AutoReconnect("projection connection dropped")
+
+            async def find_one_and_update(self, _query, update, **_kwargs):
+                # chat_messages stream-ordinal reservation
+                # (KernelEventRepository.reserve_stream_ordinals). Kept out of
+                # `calls`, which counts the batch writes under test.
+                increment = int((update.get("$inc") or {}).get(MESSAGE_STREAM_COUNTER, 1))
+                self.next_stream_seq = getattr(self, "next_stream_seq", 0) + increment
+                return {"message_id": "message", MESSAGE_STREAM_COUNTER: self.next_stream_seq}
 
         inbox = _Collection()
         projections = _Collection(fail_first=True)

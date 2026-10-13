@@ -9,6 +9,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 
 from app.api.deps import get_current_admin_user
 from app.core.db import get_db
+from app.digital_employees.constants import DIGITAL_EMPLOYEE_COLLECTION
 from app.repositories.directory_repository import DEPARTMENT_COLLECTION, USER_COLLECTION, USER_ORG_REL_COLLECTION
 from app.services.token_usage_analytics_helpers import (
     extract_user_question_from_prompt,
@@ -426,6 +427,84 @@ async def list_token_usage(
             "statuses": [{"label": item, "value": item} for item in statuses],
         },
     }
+
+
+@router.get("/employee-token-usage")
+async def employee_token_usage(
+    current_user: dict[str, Any] = Depends(get_current_admin_user),
+    departmentId: str = Query(default=""),
+    modelName: str = Query(default=""),
+) -> dict[str, Any]:
+    """数字员工成本归属 (docs/digital-employee.md, Cost attribution).
+
+    A compact per-employee grouping of employee-session token usage; the
+    per-user statistics on /token-usage stay untouched. Status/keyword
+    filters are per-request notions and do not apply to this aggregate;
+    department and model filters mirror the main list.
+    """
+    db = get_db()
+    usage_coll = db.token_usage_logs
+    employee_coll = db[DIGITAL_EMPLOYEE_COLLECTION]
+    user_org_rel_coll = db[USER_ORG_REL_COLLECTION]
+
+    scope_match, resolved_main_id = _resolve_main_scope(current_user, "")
+
+    # Only rows stamped with a non-empty employee id: absent fields and the
+    # empty-string default both mean "never an employee session".
+    match: dict[str, Any] = dict(scope_match)
+    match["digital_employee_id"] = {"$gt": ""}
+    if modelName.strip():
+        match["model_name"] = modelName.strip()
+
+    department_id = departmentId.strip()
+    if department_id:
+        rel_match: dict[str, Any] = {"org_id": department_id, "main_id": resolved_main_id}
+        rel_rows = await user_org_rel_coll.find(rel_match, {"user_id": 1}).to_list(length=50000)
+        allowed_user_ids = [str(row.get("user_id") or "") for row in rel_rows if str(row.get("user_id") or "").strip()]
+        if not allowed_user_ids:
+            return {"items": []}
+        match["user_id"] = {"$in": allowed_user_ids}
+
+    pipeline = [
+        {"$match": match},
+        {"$group": {
+            "_id": "$digital_employee_id",
+            "calls": {"$sum": 1},
+            "total_tokens": {"$sum": {"$ifNull": ["$total_tokens", 0]}},
+            "prompt_tokens": {"$sum": {"$ifNull": ["$prompt_tokens", 0]}},
+            "completion_tokens": {"$sum": {"$ifNull": ["$completion_tokens", 0]}},
+            "last_called_at": {"$max": "$created_at"},
+        }},
+        {"$sort": {"total_tokens": -1}},
+    ]
+    rows = await usage_coll.aggregate(pipeline).to_list(length=1000)
+
+    employee_ids = [str(row.get("_id") or "") for row in rows if row.get("_id")]
+    employees_by_id: dict[str, dict[str, Any]] = {}
+    if employee_ids:
+        employee_rows = await employee_coll.find(
+            {"main_id": resolved_main_id, "_id": {"$in": employee_ids}},
+            {"name": 1, "status": 1},
+        ).to_list(length=len(employee_ids))
+        employees_by_id = {str(row.get("_id") or ""): row for row in employee_rows}
+
+    items: list[dict[str, Any]] = []
+    for row in rows:
+        employee_id = str(row.get("_id") or "")
+        employee = employees_by_id.get(employee_id, {})
+        employee_name = str(employee.get("name") or "").strip()
+        items.append({
+            "employeeId": employee_id,
+            # Usage rows outlive a deleted employee; keep the grouping stable.
+            "employeeName": employee_name or f"已删除数字员工 {employee_id[:8]}",
+            "employeeStatus": str(employee.get("status") or ""),
+            "calls": int(row.get("calls") or 0),
+            "totalTokens": int(row.get("total_tokens") or 0),
+            "promptTokens": int(row.get("prompt_tokens") or 0),
+            "completionTokens": int(row.get("completion_tokens") or 0),
+            "lastCalledAt": _format_utc_datetime(row.get("last_called_at")),
+        })
+    return {"items": items}
 
 
 @router.get("/token-usage/{request_id}")

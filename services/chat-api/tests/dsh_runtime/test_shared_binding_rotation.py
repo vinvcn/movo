@@ -152,7 +152,8 @@ class _SpeakerProfiles:
             capabilities=(),
         )
 
-    async def compile_model_profile(self, *, tenant_id: str, user_id: str, model_instance_id: str | None):
+    async def compile_model_profile(self, *, tenant_id: str, user_id: str, model_instance_id: str | None,
+                                   digital_employee_id: str | None = None):
         resolved = model_instance_id or self.DEFAULT_MODEL
         snapshot = self._snapshot(tenant_id, user_id, resolved)
         self.compiled.append((user_id, resolved, snapshot.profile_version))
@@ -166,10 +167,12 @@ class _SpeakerProfiles:
         actor_id: str,
         user_id: str = "",
         model_instance_id: str | None = None,
+        digital_employee_id: str | None = None,
         activate: bool = True,
     ):
         snapshot = await self.compile_model_profile(
             tenant_id=tenant_id, user_id=user_id, model_instance_id=model_instance_id,
+            digital_employee_id=digital_employee_id,
         )
         await self.publish_snapshot(snapshot, actor_id=actor_id, activate=activate)
         return snapshot

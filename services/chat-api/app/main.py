@@ -111,6 +111,7 @@ from app.api.endpoints import (
     documents,
     dsh_model_gateway,
     dsh_tool_gateway,
+    digital_employees,
     external_tools,
     knowledge_sources,
     models,
@@ -145,6 +146,7 @@ app.include_router(documents.router, prefix="/api")
 app.include_router(knowledge_sources.router, prefix="/api")
 app.include_router(external_tools.router, prefix="/api")
 app.include_router(models.router, prefix="/api")
+app.include_router(digital_employees.router, prefix="/api")
 app.include_router(projects.router, prefix="/api")
 app.include_router(product.router, prefix="/api")
 app.include_router(sessions.router, prefix="/api")
@@ -316,6 +318,15 @@ async def startup_event() -> None:
     await db.token_usage_logs.create_index([("trace_id", 1), ("created_at", -1)])
     await db.token_usage_logs.create_index([("user_request_id", 1), ("created_at", -1)])
     await db.token_usage_logs.create_index("request_id", unique=True)
+    # Digital-employee cost attribution (docs/digital-employee.md, Operator
+    # notes): partial over rows that actually carry an employee id. Personal
+    # sessions persist the field as an empty string, so the filter is
+    # "non-empty string" rather than merely $type: string.
+    await db.token_usage_logs.create_index(
+        [("main_id", 1), ("digital_employee_id", 1)],
+        partialFilterExpression={"digital_employee_id": {"$type": "string", "$gt": ""}},
+        name="token_usage_by_employee",
+    )
     await _ensure_end_user_login_name_index(db)
     await db.end_user_sessions.create_index([("token_id", 1)], unique=True)
     await db.end_user_sessions.create_index([("main_id", 1), ("user_id", 1), ("status", 1), ("expires_at", -1)])

@@ -113,6 +113,7 @@ class SessionSummary(BaseModel):
     runtime_preset_id: str = "askai-enterprise"
     model_instance_id: Optional[str] = None
     code_project: Optional[dict] = None
+    digital_employee: Optional[dict] = None
 
 
 class SessionDetail(SessionSummary):
@@ -177,6 +178,7 @@ def _serialize_session(doc: dict, *, access: str = "owner", participant_count: i
         "runtime_preset_id": str(doc.get("runtime_preset_id") or "askai-enterprise"),
         "model_instance_id": str(doc.get("model_instance_id") or "") or None,
         "code_project": doc.get("code_project"),
+        "digital_employee": doc.get("digital_employee_summary"),
     }
 
 
@@ -204,7 +206,44 @@ def _serialize_session_summary(doc: dict) -> dict:
         "runtime_preset_id": str(doc.get("runtime_preset_id") or "askai-enterprise"),
         "model_instance_id": str(doc.get("model_instance_id") or "") or None,
         "code_project": doc.get("code_project"),
+        "digital_employee": doc.get("digital_employee_summary"),
     }
+
+
+async def _attach_digital_employee_summaries(
+    db: Any,
+    documents: List[Dict[str, Any]],
+    *,
+    main_id: str,
+) -> None:
+    """Batch-attach each session's digital-employee projection in place.
+
+    Sessions store only ``digital_employee_id``; name/avatar are read
+    fresh so an employee rename reflects in existing sessions immediately
+    (docs/digital-employee.md: edits are live). The mutated key is
+    internal: serializers project it explicitly as ``digital_employee``.
+    """
+    ids = {
+        str(doc.get("digital_employee_id") or "")
+        for doc in documents
+        if doc.get("digital_employee_id")
+    }
+    employees: Dict[str, dict] = {}
+    if ids:
+        async for row in db.digital_employees.find(
+            add_main_scope({"_id": {"$in": sorted(ids)}}, main_id),
+            {"name": 1, "avatar_url": 1},
+        ):
+            employee_id = str(row.get("_id") or "")
+            employees[employee_id] = {
+                "id": employee_id,
+                "name": str(row.get("name") or ""),
+                "avatar_url": str(row.get("avatar_url") or "") or None,
+            }
+    for doc in documents:
+        employee_id = str(doc.get("digital_employee_id") or "")
+        if employee_id:
+            doc["digital_employee_summary"] = employees.get(employee_id)
 
 
 async def _attach_pending_approval_counts(
@@ -239,6 +278,7 @@ async def _serialize_shared_sessions(
     main_id: str,
     read_cursors: Dict[str, int],
 ) -> List[dict]:
+    await _attach_digital_employee_summaries(db, documents, main_id=main_id)
     # Active non-owner participant rows per session (owners never hold a row),
     # matching the share response's participant_count convention.
     by_id = {str(doc.get("_id")): doc for doc in documents if doc.get("_id") is not None}
@@ -720,6 +760,7 @@ async def list_sessions(
         await attach_session_runtime_contexts(
             db, documents, tenant_id=main_id, user_id=user_id
         )
+        await _attach_digital_employee_summaries(db, documents, main_id=main_id)
         if shared_scope:
             sessions = await _serialize_shared_sessions(
                 db, documents, main_id=main_id, read_cursors=read_cursors
@@ -747,6 +788,7 @@ async def list_sessions(
     await attach_session_runtime_contexts(
         db, documents, tenant_id=main_id, user_id=user_id
     )
+    await _attach_digital_employee_summaries(db, documents, main_id=main_id)
     if shared_scope:
         sessions = await _serialize_shared_sessions(
             db, documents, main_id=main_id, read_cursors=read_cursors
@@ -1148,6 +1190,7 @@ async def get_session(
     # ("owner" | "shared") and the active-participant count (todo 4's
     # convention: active non-owner rows; owners never hold a row) — uniform
     # with the scope=shared list (todo 8).
+    await _attach_digital_employee_summaries(db, [session_doc], main_id=main_id)
     participant_count = len(participant_rows)
     data = _serialize_session(
         session_doc,
@@ -1202,6 +1245,7 @@ async def update_session(
     session_doc = await db.chat_sessions.find_one(add_main_scope({"_id": oid, "user_id": user_id}, main_id))
     if not session_doc:
         raise HTTPException(status_code=404, detail="Session not found")
+    await _attach_digital_employee_summaries(db, [session_doc], main_id=main_id)
     return ApiResponse(code=0, message="success", data=SessionSummary(**_serialize_session_summary(session_doc)).model_dump())
 
 

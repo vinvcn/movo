@@ -68,11 +68,19 @@ class ToolProfileDefinition(BaseModel):
 
 class ToolCatalog(Protocol):
     async def list_enabled(self, tenant_id: str, user_id: str) -> list[dict[str, Any]]: ...
+    async def list_bound(
+        self, tenant_id: str, bindings: list[dict[str, Any]]
+    ) -> list[dict[str, Any]]: ...
 
 
 class MongoToolCatalog:
     async def list_enabled(self, tenant_id: str, user_id: str) -> list[dict[str, Any]]:
         return await external_tool_registry.list_enabled_descriptors(tenant_id, user_id=user_id)
+
+    async def list_bound(
+        self, tenant_id: str, bindings: list[dict[str, Any]]
+    ) -> list[dict[str, Any]]:
+        return await external_tool_registry.list_bound_descriptors(tenant_id, bindings=bindings)
 
 
 class ToolProfileCompiler:
@@ -81,16 +89,30 @@ class ToolProfileCompiler:
         self._internal_catalog = internal_catalog
         self._policy_resolver = policy_resolver
 
-    async def compile(self, *, tenant_id: str, user_id: str) -> tuple[ToolProfileDefinition, ...]:
-        rows = await self._catalog.list_enabled(tenant_id, user_id)
+    async def compile(
+        self,
+        *,
+        tenant_id: str,
+        user_id: str,
+        employee_tool_bindings: list[dict[str, Any]] | None = None,
+    ) -> tuple[ToolProfileDefinition, ...]:
         policy = await self._policy_resolver.resolve(tenant_id, user_id) if self._policy_resolver else None
-        allowed_external_ids = await filter_allowed_resource_ids(
-            "tool",
-            main_id=tenant_id,
-            user_id=user_id,
-            resource_ids=(str(row.get("id") or "") for row in rows),
-        )
-        rows = [row for row in rows if str(row.get("id") or "") in allowed_external_ids]
+        if employee_tool_bindings is None:
+            rows = await self._catalog.list_enabled(tenant_id, user_id)
+            allowed_external_ids = await filter_allowed_resource_ids(
+                "tool",
+                main_id=tenant_id,
+                user_id=user_id,
+                resource_ids=(str(row.get("id") or "") for row in rows),
+            )
+            rows = [row for row in rows if str(row.get("id") or "") in allowed_external_ids]
+        else:
+            # Employee bundle mode (docs/digital-employee.md): the external
+            # tool set is EXACTLY the bound set. The speaker's per-user
+            # visibility is deliberately not re-applied - assignment is the
+            # grant. Internal capabilities below still follow the speaker's
+            # own capability policy: an employee cannot grant account powers.
+            rows = await self._catalog.list_bound(tenant_id, employee_tool_bindings)
         definitions: list[ToolProfileDefinition] = []
         for row in rows:
             if str(row.get("type")) == "mcp":

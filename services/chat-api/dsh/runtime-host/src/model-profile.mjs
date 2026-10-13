@@ -9,6 +9,7 @@ const ALLOWED_FIELDS = new Set([
   'accessToken',
   'toolProfile',
   'skillProfile',
+  'employeeProfile',
 ])
 
 function nonEmptyString(value) {
@@ -46,6 +47,24 @@ function validateSkillProfile(profile) {
   }
 }
 
+function validateEmployeeProfile(profile) {
+  if (profile === null || typeof profile !== 'object' || Array.isArray(profile)) {
+    throw new Error('employeeProfile must be an object')
+  }
+  const allowed = new Set(['id', 'name', 'manifesto'])
+  const unknown = Object.keys(profile).filter(key => !allowed.has(key))
+  if (unknown.length > 0) throw new Error(`employeeProfile contains forbidden fields: ${unknown.join(', ')}`)
+  for (const field of ['id', 'name']) {
+    if (!nonEmptyString(profile[field])) throw new Error(`employeeProfile is missing ${field}`)
+  }
+  if (profile.manifesto !== undefined) {
+    if (typeof profile.manifesto !== 'string') throw new Error('employeeProfile.manifesto must be a string')
+    if (profile.manifesto.length > 8192) {
+      throw new Error('employeeProfile.manifesto exceeds the 8192-character limit')
+    }
+  }
+}
+
 export function normalizeModelProfile(modelProfile, profileVersion) {
   if (modelProfile === undefined) return undefined
   if (modelProfile === null || typeof modelProfile !== 'object' || Array.isArray(modelProfile)) {
@@ -72,6 +91,9 @@ export function normalizeModelProfile(modelProfile, profileVersion) {
   }
   if (modelProfile.skillProfile !== undefined) {
     validateSkillProfile(modelProfile.skillProfile)
+  }
+  if (modelProfile.employeeProfile !== undefined) {
+    validateEmployeeProfile(modelProfile.employeeProfile)
   }
   return Object.freeze(structuredClone(modelProfile))
 }

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import re
 from collections import defaultdict
 from typing import Any
@@ -30,6 +31,7 @@ from app.enterprise_capabilities.delivery import (
 from .contracts import ApprovalAskRequest, EnterpriseActionReceipt, EnterpriseApproval, ToolExecuteRequest
 from .approval_events import approval_requested_event, approval_resolved_event
 from .approval_scope import approval_scope
+from .file_results import materialize_inline_file_results
 from .repository import EnterpriseToolRepository
 from .result_compaction import compact_tool_result
 from .execution_timeout import (
@@ -39,6 +41,8 @@ from .execution_timeout import (
     execute_with_timeout,
 )
 from .cancellation import ActiveCapabilityExecutions
+
+logger = logging.getLogger(__name__)
 
 
 class ToolPolicyDenied(RuntimeError):
@@ -422,6 +426,46 @@ class EnterpriseToolService:
                     action_id=request.actionId,
                     bundle=execution_evidence,
                 )
+            if tool.source_type == "mcp":
+                # MCP tools (gift-mcp style) return generated files inline as
+                # base64; materialize them into MOVO storage so the reply
+                # carries a download artifact card instead of base64 in the
+                # model context (reply UI design §6.2: base64 -> 落盘 -> 投递
+                # is the MOVO-side link, the MCP contract itself stays
+                # unchanged). Scoped to MCP per the design; HTTP tools can be
+                # admitted the same way once a real file-returning use case
+                # exists.
+                result, materialized_files = materialize_inline_file_results(
+                    result,
+                    context=CapabilityExecutionContext(
+                        tenant_id=claims.tenant_id,
+                        user_id=claims.user_id,
+                        conversation_id=str(binding["conversation_id"]),
+                        kernel_session_id=request.sessionId,
+                        profile_version=request.profileVersion,
+                        action_id=request.actionId,
+                        message_id=message_id,
+                    ),
+                )
+                for file_artifact in materialized_files:
+                    logger.info(
+                        "tool_inline_file_materialized tool_name=%s filename=%s object_path=%s size=%s",
+                        tool.name,
+                        str(file_artifact.get("filename") or ""),
+                        str(file_artifact.get("object_path") or ""),
+                        file_artifact.get("size"),
+                    )
+                    await self._repository.audit(
+                        tenant_id=claims.tenant_id,
+                        user_id=claims.user_id,
+                        action_id=request.actionId,
+                        event="tool.file.materialized",
+                        details={
+                            "tool_name": tool.name,
+                            "filename": str(file_artifact.get("filename") or ""),
+                            "object_path": str(file_artifact.get("object_path") or ""),
+                        },
+                    )
             if tool.delivery_mode == "authoritative_markdown" and self._authoritative_deliveries is not None:
                 await record_accepted_delivery(
                     self._authoritative_deliveries,

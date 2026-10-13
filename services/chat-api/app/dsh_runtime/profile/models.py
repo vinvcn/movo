@@ -10,6 +10,21 @@ from .tools import ToolProfileDefinition
 from .skills.models import DshSkillDefinition, WritingStyleDefinition
 
 
+class DigitalEmployeeProfile(BaseModel):
+    """Secret-free employee segment carried by the immutable snapshot.
+
+    Part of the snapshot's content hash: editing the employee rotates the
+    session's runtime profile on the next turn (docs/digital-employee.md,
+    Versioning).
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    employee_id: str = Field(min_length=1, max_length=256)
+    name: str = Field(min_length=1, max_length=256)
+    manifesto: str = Field(default="", max_length=8192)
+
+
 class RuntimeProfileSnapshot(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -32,6 +47,7 @@ class RuntimeProfileSnapshot(BaseModel):
     tools: tuple[ToolProfileDefinition, ...] = ()
     skills: tuple[DshSkillDefinition, ...] = ()
     writing_styles: tuple[WritingStyleDefinition, ...] = ()
+    digital_employee: DigitalEmployeeProfile | None = None
     skill_versions: tuple[str, ...] = ()
     workflow_versions: tuple[str, ...] = ()
     plugin_versions: tuple[str, ...] = ()
@@ -68,5 +84,13 @@ class RuntimeProfileSnapshot(BaseModel):
             payload["skillProfile"] = {
                 "skills": [skill.model_dump(mode="json") for skill in self.skills],
                 "writingStyles": [style.model_dump(mode="json") for style in self.writing_styles],
+            }
+        if self.digital_employee is not None:
+            # Consumed by the runtime host's employee system-prompt section;
+            # the host whitelist accepts exactly these three fields.
+            payload["employeeProfile"] = {
+                "id": self.digital_employee.employee_id,
+                "name": self.digital_employee.name,
+                "manifesto": self.digital_employee.manifesto,
             }
         return payload

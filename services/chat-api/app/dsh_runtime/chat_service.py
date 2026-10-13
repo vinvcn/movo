@@ -20,6 +20,11 @@ from app.dsh_runtime.bindings import BindingReplacementConflict, KernelBindingRe
 from app.dsh_runtime.contracts import CancelSessionRequest
 from app.dsh_runtime.conversation import ConversationRepository
 from app.dsh_runtime.conversation.participants_repository import SessionParticipantsRepository
+from app.dsh_runtime.digital_employees import (
+    DigitalEmployeeDisabledError,
+    DigitalEmployeeNotFoundError,
+    DigitalEmployeeRepository,
+)
 from app.dsh_runtime.events import KernelEventRepository
 from app.dsh_runtime.events.live_stream import LiveTurnStream
 from app.dsh_runtime.events.projection_writer import ProjectionScope
@@ -152,6 +157,7 @@ class DshChatService:
         language_name: str | None = None,
         selected_writing_skill_id: str | None = None,
         selected_skill_id: str | None = None,
+        digital_employee_id: str | None = None,
     ) -> PreparedTurn:
         temporal_context = build_temporal_context(timezone_name)
         locale = resolve_turn_locale(text, explicit=language_name)
@@ -206,6 +212,16 @@ class DshChatService:
             if not is_owner:
                 # A participant speaker always has another member: the owner.
                 other_member = True
+            # Session-scoped digital-employee binding (docs/digital-employee.md):
+            # the employee belongs to the conversation, not to the speaker, so
+            # every member talks to the same one. A request that disagrees
+            # with the session's binding is a client bug and is rejected
+            # loudly instead of silently switching identity.
+            session_employee_id = (
+                str((initial_lease.session or {}).get("digital_employee_id") or "").strip() or None
+            )
+            if digital_employee_id is not None and digital_employee_id != session_employee_id:
+                raise ValueError("digital_employee_mismatch")
             binding = await self._bindings.current(conversation_id, tenant_id=tenant_id, user_id=user_id)
             if binding is None:
                 # Conversations created before the DSH cut-over (and empty
@@ -217,6 +233,7 @@ class DshChatService:
                     actor_id=user_id,
                     user_id=user_id,
                     model_instance_id=model_instance_id,
+                    digital_employee_id=session_employee_id,
                     activate=False,
                 )
                 try:
@@ -297,6 +314,7 @@ class DshChatService:
                     tenant_id=tenant_id,
                     user_id=user_id,
                     model_instance_id=None,
+                    digital_employee_id=session_employee_id,
                 )
                 sync_model_id = speaker_default.model_instance_id
             try:
@@ -312,17 +330,28 @@ class DshChatService:
                     tenant_id=tenant_id,
                     user_id=user_id,
                     model_instance_id=sync_model_id,
+                    digital_employee_id=session_employee_id,
                 )).binding
             except BindingReplacementConflict as exc:
                 raise ConversationBusyError(
                     "another turn refreshed this Conversation; retry on the current binding"
                 ) from exc
         else:
+            if digital_employee_id is not None:
+                # Existence-avoiding admission (docs/digital-employee.md,
+                # Availability rules): an employee that is missing, disabled,
+                # or not usable by this caller is indistinguishable.
+                admitted = await DigitalEmployeeRepository(get_db()).admit_for_new_session(
+                    tenant_id, digital_employee_id, user_id
+                )
+                if admitted is None:
+                    raise DigitalEmployeeNotFoundError("digital_employee_not_found")
             profile = await self._profiles.publish_model_profile(
                 tenant_id=tenant_id,
                 actor_id=user_id,
                 user_id=user_id,
                 model_instance_id=model_instance_id,
+                digital_employee_id=digital_employee_id,
                 # Conversation profiles include the user's visible Tool set;
                 # they are immutable execution snapshots, not tenant defaults.
                 activate=False,
@@ -331,6 +360,7 @@ class DshChatService:
                 tenant_id=tenant_id,
                 user_id=user_id,
                 title=text[:120],
+                digital_employee_id=digital_employee_id,
             )
             conversation_id = str(conversation["_id"])
             try:

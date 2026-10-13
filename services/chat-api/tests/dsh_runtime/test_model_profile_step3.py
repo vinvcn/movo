@@ -193,7 +193,13 @@ def test_model_gateway_accounts_usage_to_signed_speaker(monkeypatch: pytest.Monk
 async def _test_model_gateway_enforces_scope_maps_messages_and_usage() -> None:
     client = FakeClient()
 
-    async def factory(model_instance_id: str, tenant_id: str, _request: ModelGatewayRequest, user_id: str) -> BaseLLMClient:
+    async def factory(
+        model_instance_id: str,
+        tenant_id: str,
+        _request: ModelGatewayRequest,
+        user_id: str,
+        _digital_employee_id: str = "",
+    ) -> BaseLLMClient:
         assert (model_instance_id, tenant_id, user_id) == ("model-a", "tenant-a", "speaker-a")
         return client
 
@@ -244,7 +250,13 @@ def test_model_gateway_normalizes_provider_failures(
     retryable: bool,
 ) -> None:
     async def run() -> None:
-        async def factory(_model: str, _tenant: str, _request: ModelGatewayRequest, _user_id: str) -> BaseLLMClient:
+        async def factory(
+            _model: str,
+            _tenant: str,
+            _request: ModelGatewayRequest,
+            _user_id: str,
+            _digital_employee_id: str = "",
+        ) -> BaseLLMClient:
             return FakeClient(failure=provider_error)
 
         tokens = ModelGatewayTokenService("step-3-test-signing-secret")
