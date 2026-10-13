@@ -1,0 +1,46 @@
+# Digital-employee QA-only overlay. Never merged into the shipped
+# docker-compose.yml. Layers on top of docker-compose.yml +
+# qa/docker-compose.qa-stub.yml.
+#
+# Why it exists (unlike the session-sharing stack, which ran against the
+# default `gragentic` database): a long-lived dev stack already has a
+# completed `system_bootstrap` singleton, so the one-time /admin/setup wizard
+# cannot seed another organization into that database. This overlay points the
+# QA project's chat-api and admin-api at a DEDICATED LOGICAL DATABASE
+# (`movo_qa_employee`) and moves the QA admin-api / document workers onto
+# Redis db 1, so a co-existing dev stack's data, queues and caches stay
+# untouched. Under its own compose project name the QA stack brings its own
+# mongo/redis/weaviate services, so the isolation holds whether or not a dev
+# stack is running. The setup singleton in the dedicated database is fresh, so
+# the wizard (driven through the real admin API with
+# qa/digital-employee-setup.json) seeds the org exactly like the
+# session-sharing precedent.
+#
+# The four services the digital-employee feature touched (#40-#45) run from
+# images built from THIS worktree (tag qa-employee); everything else
+# (document parser, gateway) keeps the local :latest image. The runtime host
+# is NOT stale-safe: #42-#45 changed its kernel-runtime/model-profile/persona
+# sources (employeeProfile segment), so it is pinned to the rebuilt tag too.
+services:
+  chat-api:
+    image: movo-chat-api:qa-employee
+    environment:
+      MONGODB_DB: movo_qa_employee
+  admin-api:
+    image: movo-admin-api:qa-employee
+    environment:
+      ASKAI_ADMIN_MONGODB_DB: movo_qa_employee
+      ASKAI_ADMIN_REDIS_URL: redis://redis:6379/1
+  dsh-runtime-host:
+    image: movo-dsh-runtime-host:qa-employee
+  user-web:
+    image: movo-user-web:qa-employee
+  admin-web:
+    image: movo-admin-web:qa-employee
+  document-api:
+    environment:
+      MOVO_DOC_PROCESSING_REDIS_URL: redis://redis:6379/1
+  document-worker:
+    environment:
+      MOVO_DOC_PROCESSING_REDIS_URL: redis://redis:6379/1
+
