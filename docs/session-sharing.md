@@ -77,6 +77,14 @@ running turn belongs to the member who started it: only they can stop it, and
 tool-call approvals raised during a turn can only be listed and decided by
 that same member.
 
+Digital-employee sessions are the one deliberate exception to the first
+sentence: a session bound to a digital employee compiles its skills and tools
+from the employee's bound bundle for every speaker, so all members talk to
+the same employee with the same bundle. See
+[Digital employees](digital-employee.md) and
+[ADR 0002](adr/0002-digital-employee-session-scoped-bundle.md) for the exact
+semantics and the per-speaker capability floor that still applies.
+
 ## What shared history exposes
 
 A participant reads the conversation's full history as it was produced,
