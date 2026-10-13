@@ -16,6 +16,7 @@ import {
 } from '../src/composables/browser/browserInterventionProjection'
 import { renderAssistantMarkdown, workspaceFileReference } from '../src/utils/assistantMarkdown'
 import { resolveArtifactKind } from '../src/features/execution-v3/domain/artifactKind'
+import { resolveArtifactPresentation } from '../src/registries'
 
 let sequence = 0
 function event(overrides: Partial<ExecutionEventV3>): ExecutionEventV3 {
@@ -136,6 +137,32 @@ function event(overrides: Partial<ExecutionEventV3>): ExecutionEventV3 {
     kind: 'presentation_preview_bundle',
     content_type: 'text/html',
   }), 'presentation_preview_bundle')
+}
+
+{
+  // Artifact card actions: edit/preview/export belong to blueprint-backed
+  // presentation decks; a plain pptx file (external tool deliverable, e.g.
+  // the gift brochure) offers download only.
+  const plainPptx = {
+    kind: 'document',
+    filename: '小礼宣传册_20261010.pptx',
+    object_path: 'u/2026/10/10/小礼宣传册_20261010.pptx',
+    content_type: 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+  }
+  assert.deepEqual(resolveArtifactPresentation(plainPptx).actions, ['download'])
+  assert.equal(resolveArtifactPresentation(plainPptx).icon, resolveArtifactPresentation({ type: 'pptx' }).icon)
+  const blueprintPptx = {
+    ...plainPptx,
+    bundle: {
+      deck_ir_artifact: { object_path: 'u/deck.json' },
+      preview_metadata: { blueprint_artifact_path: 'u/deck.json' },
+      slide_count: 3,
+    },
+  }
+  assert.deepEqual(resolveArtifactPresentation(blueprintPptx).actions, ['edit', 'preview', 'export', 'download'])
+  const previewOnlyBundle = { ...plainPptx, bundle: { html_preview: { url: 'https://x/p.html' } } }
+  assert.deepEqual(resolveArtifactPresentation(previewOnlyBundle).actions, ['edit', 'preview', 'export', 'download'])
+  assert.deepEqual(resolveArtifactPresentation({ type: 'presentation_preview_bundle' }).actions, ['edit', 'preview', 'export'])
 }
 
 {

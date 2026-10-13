@@ -6,6 +6,8 @@ from typing import Any
 
 from app.core.config import get_settings
 from app.core.db import get_db
+from app.dsh_runtime.digital_employees import DigitalEmployeeRepository
+from app.dsh_runtime.profile.compiler import MongoEmployeeCatalog
 from app.dsh_runtime.bindings import KernelBindingRepository
 from app.dsh_runtime.chat_service import DshChatService
 from app.dsh_runtime.conversation import ConversationRepository
@@ -89,6 +91,9 @@ class DshRuntimeApplication:
         await conversations.ensure_indexes()
         await bindings.ensure_indexes()
         await events.ensure_indexes()
+        # Assignment indexes for digital-employee availability (the admin
+        # console writes the same collections; both services ensure them).
+        await DigitalEmployeeRepository(db).ensure_indexes()
         await tool_repository.ensure_indexes()
         await presentation_jobs.ensure_indexes()
         await presentation_jobs.recover_running()
@@ -111,6 +116,7 @@ class DshRuntimeApplication:
                 ToolProfileCompiler(MongoToolCatalog(), internal_catalog, employee_policy),
                 SkillProfileCompiler(MongoSkillCatalog()),
                 get_product_extension().model_access_policy,
+                employee_catalog=MongoEmployeeCatalog(db),
             ),
             store,
         )

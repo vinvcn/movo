@@ -7,7 +7,7 @@ import pytest
 
 from app.dsh_runtime.chat_service import DshChatService
 from app.dsh_runtime.errors import DshRuntimeError
-from app.dsh_runtime.turn_finalization import TurnStateFinalizer
+from app.dsh_runtime.turn_finalization import TurnFinalizationRetryableError, TurnStateFinalizer
 
 
 def _binding() -> dict:
@@ -186,10 +186,17 @@ def test_sidebar_state_is_not_cleared_when_admission_lock_update_fails() -> None
         conversations = _Conversations()
         finalizer = TurnStateFinalizer(_FailingBindings(), conversations)  # type: ignore[arg-type]
 
-        with pytest.raises(RuntimeError, match="database unavailable"):
+        # The coordinator wraps a failed binding transition in its retryable
+        # error (the original cause is preserved) — and, critically, the
+        # sidebar active_run is NOT cleared.
+        with pytest.raises(
+            TurnFinalizationRetryableError, match="transition the binding to terminal"
+        ) as failure:
             await finalizer.finalize(
                 binding=_binding(), message_id="message-a", status="cancelled"
             )
+        assert isinstance(failure.value.__cause__, RuntimeError)
+        assert "database unavailable" in str(failure.value.__cause__)
         assert conversations.cleared is False
 
     asyncio.run(run())

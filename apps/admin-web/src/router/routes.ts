@@ -7,6 +7,7 @@ import { TokenStatsIcon } from '@/icons/TokenStatsIcon';
 import { TrafficAllocationIcon } from '@/icons/TrafficAllocationIcon';
 import { UserManagementIcon } from '@/icons/UserManagementIcon';
 import { ToolsMcpIcon } from '@/icons/ToolsMcpIcon';
+import { DigitalEmployeeIcon } from '@/icons/DigitalEmployeeIcon';
 import { SkillsManagerIcon } from '@/icons/SkillsManagerIcon';
 import { SettingsIcon } from '@/icons/SettingsIcon';
 import { PositionRolesIcon } from '@/icons/PositionRolesIcon';
@@ -94,6 +95,12 @@ export const appRoutes: RouteRecordRaw[] = [
         name: 'ToolEdit',
         component: () => import('@/views/tools/ToolEditPage.vue'),
         meta: { title: '编辑工具连接', hideInMenu: true },
+      },
+      {
+        path: '/digital-employees',
+        name: 'DigitalEmployees',
+        component: () => import('@/views/digital-employees/DigitalEmployeesPage.vue'),
+        meta: { title: '数字员工', icon: DigitalEmployeeIcon },
       },
       {
         path: '/models',

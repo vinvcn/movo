@@ -10,6 +10,7 @@ MODULE_LABELS = {
     "organizations": "账号组与账号",
     "directory": "组织与用户",
     "position-roles": "用户岗位角色",
+    "digital-employees": "数字员工",
     "traffic-allocations": "流量分配",
     "settings": "系统设置",
     "auth": "账号与登录",

@@ -33,6 +33,13 @@ class RuntimeProfileResolver:
             profile_version=snapshot.profile_version,
             model_instance_id=snapshot.model_instance_id,
             user_id=snapshot.subject_user_id,
+            # Cost attribution (docs/digital-employee.md): employee sessions
+            # stamp their usage rows with the employee id next to the speaker.
+            digital_employee_id=(
+                snapshot.digital_employee.employee_id
+                if snapshot.digital_employee is not None
+                else ""
+            ),
         )
         tool_token = ""
         if snapshot.tools:

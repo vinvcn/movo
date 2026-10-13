@@ -330,9 +330,10 @@ class KernelEventProjector:
         if not isinstance(value, dict):
             return []
         candidates: list[Any] = []
-        if isinstance(value.get("artifact"), dict):
-            candidates.append(value["artifact"])
-        candidates.extend(item for item in list(value.get("documents") or []) if isinstance(item, dict))
+        for payload in KernelEventProjector._artifact_payloads(value):
+            if isinstance(payload.get("artifact"), dict):
+                candidates.append(payload["artifact"])
+            candidates.extend(item for item in list(payload.get("documents") or []) if isinstance(item, dict))
         result: list[dict[str, Any]] = []
         seen: set[str] = set()
         for item in candidates:
@@ -347,6 +348,25 @@ class KernelEventProjector:
             seen.add(marker)
             result.append(dict(item))
         return result
+
+    @staticmethod
+    def _artifact_payloads(value: dict[str, Any]) -> list[dict[str, Any]]:
+        """Payloads that may carry artifacts, unwrapping the MCP result wrapper.
+
+        MCP tools reach DSH as their ``structuredContent`` wrapper
+        (``{"result": "<json string>"}``); the tool gateway attaches artifact
+        metadata inside that envelope string, so it must be parsed back out.
+        """
+        payloads = [value]
+        nested = value.get("result")
+        if isinstance(nested, str) and 0 < len(nested) <= 262_144 and nested.lstrip().startswith("{"):
+            try:
+                parsed = json.loads(nested)
+            except (TypeError, ValueError):
+                parsed = None
+            if isinstance(parsed, dict):
+                payloads.append(parsed)
+        return payloads
 
     @staticmethod
     def _browser_intervention(name: str, value: Any) -> dict[str, Any] | None:

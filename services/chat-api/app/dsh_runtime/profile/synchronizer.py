@@ -41,6 +41,7 @@ class ConversationProfileSynchronizer:
         tenant_id: str,
         user_id: str,
         model_instance_id: str | None = None,
+        digital_employee_id: str | None = None,
     ) -> ProfileSyncResult:
         restored = await self._coordinator.restore(binding)
         previous_version = str(restored["profile_version"])
@@ -50,6 +51,9 @@ class ConversationProfileSynchronizer:
             tenant_id=tenant_id,
             user_id=user_id,
             model_instance_id=desired_model_id,
+            # Session-scoped employee: every speaker of this conversation
+            # compiles the same employee segment (docs/digital-employee.md).
+            digital_employee_id=digital_employee_id,
         )
         if desired.profile_version == previous_version:
             return ProfileSyncResult(

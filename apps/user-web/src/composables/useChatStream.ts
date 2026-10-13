@@ -36,6 +36,9 @@ export class ChatStreamHttpError extends Error {
 export interface ChatStreamRequest {
   messages: any[]
   modelId?: string
+  /** #42: binds the NEW conversation to a digital employee; the server honors
+   *  it only when the request creates the conversation (no output_spec.task_id). */
+  digitalEmployeeId?: string
   output_spec?: Record<string, any>
   knowledgeQaEnabled?: boolean
   knowledgeBaseIds?: string[]

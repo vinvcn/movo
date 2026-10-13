@@ -14,6 +14,7 @@ import { AskaiToolBridge } from './askai-tool-bridge-plugin.mjs'
 import { AskaiWebSearchProvider } from './askai-web-search-provider.mjs'
 import { RuntimeTemporalContext } from './runtime-temporal-context.mjs'
 import { RuntimeTurnContext } from './runtime-turn-context.mjs'
+import { RuntimeEmployeeContext } from './runtime-employee-context.mjs'
 import { OfficialDshHostComposition } from './official-host/composition.mjs'
 import { compatibleSessionEvents } from './official-host/event-compat.mjs'
 import { LiveAssistantStream } from './official-host/live-assistant-stream.mjs'
@@ -47,6 +48,7 @@ export class KernelRuntime {
   #webSearchDispose
   #temporalContext = new RuntimeTemporalContext()
   #turnContext = new RuntimeTurnContext()
+  #employeeContext
   #composition
   #sessionComposer
   #workspaces
@@ -61,6 +63,7 @@ export class KernelRuntime {
     this.profileVersion = profileVersion
     this.modelProfile = modelProfile === undefined ? undefined : Object.freeze(structuredClone(modelProfile))
     this.#skillInvocations = new SkillInvocationTracker(this.modelProfile?.skillProfile)
+    this.#employeeContext = new RuntimeEmployeeContext(this.modelProfile?.employeeProfile)
     const storageKey = createHash('sha256').update(isolationKey).digest('hex')
     this.storageRoot = resolve(storageRoot, storageKey)
   }
@@ -75,6 +78,7 @@ export class KernelRuntime {
     this.#ctx = ctx
     this.#temporalContext.install(ctx)
     this.#turnContext.install(ctx)
+    this.#employeeContext.install(ctx)
     const skillProviderRegistration = registerAskaiSkillProvider(
       ctx, this.modelProfile?.skillProfile, { storageRoot: this.storageRoot },
     )
@@ -343,6 +347,7 @@ export class KernelRuntime {
     this.#skillProviderDispose?.()
     this.#temporalContext.dispose()
     this.#turnContext.dispose()
+    this.#employeeContext.dispose()
     await this.#composition?.dispose()
     this.#ctx = undefined
   }

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Any, Protocol
 
 from app.services.org_skill_adapter import organization_skill_adapter
@@ -9,9 +10,14 @@ from app.services.skills import user_skill_service
 from app.core.db import get_db
 from app.product.resource_access import filter_allowed_resource_ids
 
+logger = logging.getLogger(__name__)
+
 
 class SkillCatalog(Protocol):
     async def list_enabled(self, tenant_id: str, user_id: str) -> list[dict[str, Any]]: ...
+    async def list_bound_organization(
+        self, tenant_id: str, skill_ids: list[str]
+    ) -> list[dict[str, Any]]: ...
 
 
 class MongoSkillCatalog:
@@ -39,6 +45,54 @@ class MongoSkillCatalog:
                 continue
             seen.add(source_id)
             rows.append(dict(item))
+        await self._attach_runtime_bundles(tenant_id, rows)
+        return rows
+
+    async def list_bound_organization(
+        self, tenant_id: str, skill_ids: list[str]
+    ) -> list[dict[str, Any]]:
+        """Employee bundle mode (docs/digital-employee.md): EXACTLY these
+        organization skills, granted by assignment - no personal skills, no
+        per-user visibility narrowing. The control plane stores raw
+        ``skills._id`` values while the runtime adapter exposes
+        ``org_skill:<mongo-id>``, so both forms are accepted.
+
+        Missing or disabled ids are skipped with a warning (reference
+        hygiene), never a hard failure.
+        """
+        wanted = {str(item).strip() for item in skill_ids if str(item).strip()}
+        if not wanted:
+            return []
+        organization = await organization_skill_adapter.list_runtime_skills(main_id=tenant_id)
+        rows: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        matched: set[str] = set()
+        for item in organization:
+            if not isinstance(item, dict):
+                continue
+            source_id = str(item.get("id") or "").strip()
+            raw_id = source_id.removeprefix("org_skill:")
+            if raw_id not in wanted:
+                continue
+            if not source_id or source_id in seen:
+                continue
+            if item.get("enabled", item.get("is_active", True)) is False:
+                continue
+            matched.add(raw_id)
+            seen.add(source_id)
+            rows.append(dict(item))
+        missing = wanted - matched
+        if missing:
+            logger.warning(
+                "employee_bundle_skill_references_missing tenant_id=%s missing=%s",
+                tenant_id,
+                ",".join(sorted(missing)),
+            )
+        await self._attach_runtime_bundles(tenant_id, rows)
+        return rows
+
+    @staticmethod
+    async def _attach_runtime_bundles(tenant_id: str, rows: list[dict[str, Any]]) -> None:
         package_ids = [str(item.get("package_id") or "") for item in rows if item.get("package_id")]
         if package_ids:
             packages = await get_db().skill_packages.find({
@@ -55,4 +109,3 @@ class MongoSkillCatalog:
                     if resource_files:
                         row["runtime_bundle_base64"] = str(package.get("archive_base64") or "")
                         row["runtime_bundle_root"] = str(package.get("root_prefix") or "")
-        return rows

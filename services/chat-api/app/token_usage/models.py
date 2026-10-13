@@ -11,6 +11,10 @@ class TokenUsageRecord(BaseModel):
     user_request_id: str = ""
     main_id: str = "default"
     user_id: str = ""
+    # Digital-employee sessions stamp the employee id next to the speaking
+    # user (docs/digital-employee.md, Cost attribution). Empty string means
+    # a personal session; the per-employee index is partial over non-empty.
+    digital_employee_id: str = ""
     session_id: str = ""
     trace_id: str = ""
     stage: str = ""

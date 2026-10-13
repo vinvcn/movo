@@ -101,6 +101,13 @@ class ConversationRepository:
             partialFilterExpression={"share_token_hash": {"$type": "string"}},
             name="unique_main_share_token_hash",
         )
+        # Digital-employee sessions by employee (docs/digital-employee.md,
+        # Operator notes): partial over rows that actually carry a binding.
+        await self._sessions.create_index(
+            [("main_id", 1), ("digital_employee_id", 1)],
+            partialFilterExpression={"digital_employee_id": {"$type": "string"}},
+            name="sessions_by_employee",
+        )
         existing = (await self._messages.index_information()).get(
             UNIQUE_MESSAGE_SEQ_INDEX_NAME
         )
@@ -169,7 +176,14 @@ class ConversationRepository:
             )
         return samples
 
-    async def create(self, *, tenant_id: str, user_id: str, title: str) -> dict[str, Any]:
+    async def create(
+        self,
+        *,
+        tenant_id: str,
+        user_id: str,
+        title: str,
+        digital_employee_id: str | None = None,
+    ) -> dict[str, Any]:
         now = datetime.utcnow()
         document = {
             "user_id": user_id,
@@ -185,6 +199,9 @@ class ConversationRepository:
             "share_token_hash": None,
             "share_expires_at": None,
             "share_revoked_at": None,
+            # Session-scoped digital-employee binding (docs/digital-employee.md):
+            # written once at creation, never changed afterwards.
+            "digital_employee_id": digital_employee_id or None,
         }
         result = await self._sessions.insert_one(document)
         document["_id"] = result.inserted_id

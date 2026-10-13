@@ -19,6 +19,10 @@ class ModelGatewayClaims:
     issued_at: int
     expires_at: int
     user_id: str = ""
+    # Set only for digital-employee sessions; empty means a personal session.
+    # Cost attribution reads this to stamp usage rows per employee
+    # (docs/digital-employee.md, Cost attribution).
+    digital_employee_id: str = ""
 
 
 class ModelGatewayTokenService:
@@ -30,7 +34,15 @@ class ModelGatewayTokenService:
         self._key = hashlib.sha256(secret.encode("utf-8")).digest()
         self._ttl_seconds = ttl_seconds
 
-    def issue(self, *, tenant_id: str, profile_version: str, model_instance_id: str, user_id: str = "") -> str:
+    def issue(
+        self,
+        *,
+        tenant_id: str,
+        profile_version: str,
+        model_instance_id: str,
+        user_id: str = "",
+        digital_employee_id: str = "",
+    ) -> str:
         now = int(time.time())
         payload = {
             "aud": "askai-model-gateway",
@@ -38,6 +50,7 @@ class ModelGatewayTokenService:
             "profile_version": profile_version,
             "model_instance_id": model_instance_id,
             "user_id": user_id,
+            "digital_employee_id": digital_employee_id,
             "iat": now,
             "exp": now + self._ttl_seconds,
             "jti": secrets.token_hex(8),
@@ -67,6 +80,9 @@ class ModelGatewayTokenService:
             issued_at=int(payload["iat"]),
             expires_at=int(payload["exp"]),
             user_id=str(payload.get("user_id") or ""),
+            # Tokens minted before the employee claim existed carry no
+            # digital_employee_id key; they verify as personal sessions.
+            digital_employee_id=str(payload.get("digital_employee_id") or ""),
         )
 
     @staticmethod

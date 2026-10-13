@@ -23,6 +23,8 @@ import EvidenceDrawer from './execution/EvidenceDrawer.vue'
 import KnowledgeSourceViewer from './execution/KnowledgeSourceViewer.vue'
 import UserMessageActions from './chat/UserMessageActions.vue'
 import UserMessageAuthor from './chat/UserMessageAuthor.vue'
+import MessageAvatar from './chat/MessageAvatar.vue'
+import { rowAvatarIdentity, type RowAvatarIdentity } from './chat/messageRowAvatar'
 import type { ArtifactItem, EvidenceBundleItem, EvidenceSourceItem } from '../features/execution-v3/domain/delivery'
 import { evidenceSourceStats } from '../features/execution-v3/domain/evidenceSourceGroups'
 import { resolvePermission } from '../composables/useChatStream'
@@ -31,6 +33,7 @@ import { mergeEvidenceBundles } from '../composables/evidenceBundles'
 import { t, useLocale } from '../composables/i18n'
 import { formatAppTime } from '../composables/appTimezone'
 import { useChatModels } from '../composables/useChatModels'
+import { useDigitalEmployees } from '../composables/useDigitalEmployees'
 import { useBrowserWorkspace } from '../composables/browser/useBrowserWorkspace'
 import type { ExecutionStoreV3 } from '../features/execution-v3/stores/executionStore'
 import { ensureMessageExecutionV3 } from '../features/execution-v3/stores/messageExecution'
@@ -63,8 +66,14 @@ const props = defineProps<{
   initialMessages?: Message[]
   sessionId?: string
   modelInstanceId?: string
+  /** #42: the pane's digital-employee selection (the runtime store owns it);
+   *  rendered by the composer's picker while the pane has no session yet. */
+  digitalEmployeeId?: string
   userId?: string
   mainId?: string
+  /** 消息行里本人头像用的展示名与头像地址（由 App.vue 从用户资料注入）。 */
+  userDisplayName?: string
+  userAvatarUrl?: string
   authToken?: string
   active: boolean
   running?: boolean
@@ -135,6 +144,9 @@ const emit = defineEmits<{
   (e: 'open-tools'): void
   (e: 'open-knowledge'): void
   (e: 'send', payload: { text: string; images: File[]; documents: PendingDocument[]; knowledgeQaEnabled: boolean; selectedSkillId?: string; modelId?: string; onRejected?: () => void }): void
+  /** #42: the composer's digital-employee picker selection; App.vue routes it
+   *  into the runtime store's per-pane state. */
+  (e: 'select-digital-employee', employeeId: string): void
   (e: 'stop'): void
   (e: 'refresh-session'): void
   (e: 'clear-intervention'): void
@@ -371,6 +383,25 @@ function sharedAuthorAvatar(msg: Message): string | null {
   return msg.author?.avatar_url ?? null
 }
 
+function isOwnRow(msg: Message): boolean {
+  return msg.role === 'user' && isOwnMessage(msg)
+}
+
+function rowAvatar(msg: Message): RowAvatarIdentity {
+  return rowAvatarIdentity(msg.role, {
+    shared: Boolean(props.shared),
+    ownMessage: isOwnMessage(msg),
+    authorName: sharedAuthorName(msg),
+    authorAvatarUrl: sharedAuthorAvatar(msg),
+    userDisplayName: (props.userDisplayName ?? '').trim() || null,
+    userAvatarUrl: (props.userAvatarUrl ?? '').trim() || null,
+    // 助手行用本会话绑定的数字员工身份；未绑定时纯函数退化为「普通员工」。
+    employeeName: selectedDigitalEmployee.value?.name ?? null,
+    employeeAvatarUrl: selectedDigitalEmployee.value?.avatar_url ?? null,
+    locale: locale.value,
+  })
+}
+
 const imagePreviewOpen = ref(false)
 const imagePreviewSrc = ref('')
 const imagePreviewAlt = ref('preview')
@@ -405,6 +436,34 @@ const {
   getMainId: () => props.mainId || 'default',
   getLocale: () => locale.value,
   getPreferredModelId: () => props.modelInstanceId || '',
+})
+// #42: digital-employee picker — the list is tenant-scoped and only needed for
+// a conversation that does not exist yet, so session panes never fetch it.
+// Exception: a session that already carries a digital-employee binding needs the
+// list to resolve the employee's name/avatar for the composer chip and the
+// assistant message rows, so that one case fetches it deliberately (and only
+// when an id is actually present).
+const {
+  availableDigitalEmployees,
+  digitalEmployeesLoading,
+  digitalEmployeeLoadError,
+  loadDigitalEmployees,
+} = useDigitalEmployees({ getMainId: () => props.mainId || 'default' })
+function ensureDigitalEmployeesForBinding() {
+  if (digitalEmployeesLoading.value || availableDigitalEmployees.value.length) return
+  if (props.sessionId && !props.digitalEmployeeId) return
+  void loadDigitalEmployees()
+}
+watch(() => props.sessionId, ensureDigitalEmployeesForBinding, { immediate: true })
+watch(() => props.digitalEmployeeId, ensureDigitalEmployeesForBinding)
+const selectedDigitalEmployee = computed(() => (
+  availableDigitalEmployees.value.find((item) => item.id === props.digitalEmployeeId) || null
+))
+const digitalEmployeeSelectorLabel = computed(() => {
+  if (digitalEmployeesLoading.value) return locale.value === 'en' ? 'Loading...' : '加载中...'
+  if (digitalEmployeeLoadError.value) return locale.value === 'en' ? 'Load failed' : '加载失败'
+  if (selectedDigitalEmployee.value) return selectedDigitalEmployee.value.name
+  return locale.value === 'en' ? 'Standard' : '普通'
 })
 watch(() => props.modelInstanceId, (modelId) => {
   if (modelId) selectChatModel(modelId)
@@ -1412,6 +1471,8 @@ onMounted(() => {
 watch(() => props.mainId, () => {
   loadChatModels()
   void loadPromptGuideShortcuts()
+  // #42: the employee list is tenant-scoped; refresh it for a new conversation.
+  if (!props.sessionId) void loadDigitalEmployees()
 })
 
 watch(() => props.authToken, () => void loadPromptGuideShortcuts())
@@ -2100,6 +2161,7 @@ function formatErrorMessage(raw: string): string {
             :data-scroll-anchor="stickyState === 'LOCKED' && msg._id === stickyAssistantMsgId ? 'true' : undefined"
             :style="msg.role === 'assistant' ? assistantTurnStyle(msg) : undefined"
           >
+          <MessageAvatar v-if="!isOwnRow(msg)" class="mt-1" v-bind="rowAvatar(msg)" />
           <!-- Message Bubble Container -->
           <div 
             class="relative max-w-[85%] rounded-2xl bg-transparent transition-all duration-200"
@@ -2240,6 +2302,7 @@ function formatErrorMessage(raw: string): string {
               />
             </template>
           </div>
+          <MessageAvatar v-if="isOwnRow(msg)" class="mt-1" v-bind="rowAvatar(msg)" />
         </div>
         </div>
       </div>
@@ -2319,9 +2382,15 @@ function formatErrorMessage(raw: string): string {
         :main-id="props.mainId || 'default'"
         :allow-knowledge="allowKnowledge"
         :allow-skills="allowSkills"
+        :digital-employees="availableDigitalEmployees"
+        :digital-employee-selectable="!props.sessionId"
+        :selected-digital-employee-id="props.digitalEmployeeId || ''"
+        :digital-employee-selector-label="digitalEmployeeSelectorLabel"
+        :digital-employee-load-error="digitalEmployeeLoadError"
         @send="(payload) => emit('send', payload)"
         @stop="emit('stop')"
         @select-model="selectChatModel"
+        @select-digital-employee="(employeeId) => emit('select-digital-employee', employeeId)"
         @image-preview="({ src, alt }) => openImagePreview(src, alt)"
       >
         <template #context>

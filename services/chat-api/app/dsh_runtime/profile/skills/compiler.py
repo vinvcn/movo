@@ -24,9 +24,20 @@ class SkillProfileCompiler:
         self._catalog = catalog
 
     async def compile(
-        self, *, tenant_id: str, user_id: str, tools: tuple[ToolProfileDefinition, ...]
+        self,
+        *,
+        tenant_id: str,
+        user_id: str,
+        tools: tuple[ToolProfileDefinition, ...],
+        employee_skill_ids: list[str] | None = None,
     ) -> CompiledSkillProfile:
-        rows = await self._catalog.list_enabled(tenant_id, user_id)
+        if employee_skill_ids is None:
+            rows = await self._catalog.list_enabled(tenant_id, user_id)
+        else:
+            # Employee bundle mode (docs/digital-employee.md): exactly the
+            # bound organization skills - no personal skills, no per-user
+            # visibility narrowing. Missing ids were warned by the catalog.
+            rows = await self._catalog.list_bound_organization(tenant_id, employee_skill_ids)
         styles = tuple(self._compile_style(row) for row in rows if is_writing_style(row))
         style_refs = self._style_ref_aliases(styles)
         skills: list[DshSkillDefinition] = []

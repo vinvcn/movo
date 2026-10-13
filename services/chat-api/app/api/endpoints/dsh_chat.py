@@ -21,6 +21,7 @@ from app.core.quota_policy import QuotaExceededError, assert_quota_available
 from app.core.tenant import resolve_main_id
 from app.dsh_runtime.application import dsh_runtime_application
 from app.dsh_runtime.chat_service import ConversationBusyError
+from app.dsh_runtime.digital_employees import DigitalEmployeeDisabledError
 from app.dsh_runtime.conversation import ConversationRepository
 from app.dsh_runtime.conversation.participants_repository import (
     SessionParticipantsRepository,
@@ -90,6 +91,15 @@ class ChatRequest(BaseModel):
     )
     knowledge_base_ids: list[str] | None = Field(default=None, alias="knowledgeBaseIds")
     timezone: str | None = Field(default=None, min_length=1, max_length=100)
+    digital_employee_id: str | None = Field(
+        default=None,
+        alias="digitalEmployeeId",
+        max_length=256,
+        description=(
+            "Bind the NEW conversation to this digital employee; the binding"
+            " is immutable afterwards (docs/digital-employee.md)."
+        ),
+    )
 
 
 class CancelRequest(BaseModel):
@@ -252,6 +262,7 @@ async def _start_chat_completions(
             selected_writing_skill_id=skill_selection.selected_writing_skill_id,
             selected_skill_id=skill_selection.selected_skill_id,
             user_message_id=user_message_id,
+            digital_employee_id=str(request.digital_employee_id or "").strip() or None,
         )
     except ConversationBusyError as exc:
         raise HTTPException(
@@ -272,6 +283,18 @@ async def _start_chat_completions(
         raise HTTPException(
             status_code=409,
             detail={"code": exc.code, "message": str(exc), "session_id": exc.conversation_id},
+        ) from exc
+    except DigitalEmployeeDisabledError as exc:
+        # Hard block for a bound session whose employee was disabled
+        # (docs/digital-employee.md, Errors): history stays readable, the
+        # next send is refused with the real reason.
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "digital_employee_disabled",
+                "message": "该数字员工已停用，本会话暂无法继续；历史记录仍可查看",
+                "session_id": conversation_id,
+            },
         ) from exc
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc

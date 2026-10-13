@@ -1,0 +1,18 @@
+{
+  "orgName": "QA Digital Employee Org",
+  "adminUsername": "qa-employee-admin",
+  "adminPassword": "qa-employee-admin-pass-2026",
+  "employeeUsername": "qa-employee-owner",
+  "employeePassword": "qa-employee-owner-pass-2026",
+  "employeeName": "QA 数字员工测试员工",
+  "orgTotalTokens": 1000000,
+  "defaultUserTokens": 100000,
+  "model": {
+    "providerId": "",
+    "displayName": "QA Stub Chat",
+    "modelName": "qa-stub-chat",
+    "baseUrl": "http://qa-model-stub:8200/v1",
+    "apiKey": "qa-local-stub-key",
+    "capability": "chat"
+  }
+}
