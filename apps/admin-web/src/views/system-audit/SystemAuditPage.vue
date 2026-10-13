@@ -33,6 +33,7 @@ const moduleOptions = [
   { label: t('知识文档'), value: 'knowledge' },
   { label: t('组织与用户'), value: 'directory' },
   { label: t('用户岗位角色'), value: 'position-roles' },
+  { label: t('数字员工'), value: 'digital-employees' },
   { label: t('流量分配'), value: 'traffic-allocations' },
   { label: t('系统设置'), value: 'settings' },
   { label: t('账号组与账号'), value: 'organizations' },

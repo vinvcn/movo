@@ -65,6 +65,27 @@
       </n-card>
     </div>
 
+    <n-card
+      v-if="employeeUsage.length"
+      ref="employeeCardRef"
+      class="employee-usage-card shell-card"
+      :bordered="false"
+      size="small"
+    >
+      <template #header>{{ t('数字员工用量') }}</template>
+      <n-data-table
+        :loading="employeeUsageLoading"
+        :columns="employeeColumns"
+        :data="employeeUsage"
+        :pagination="false"
+        :max-height="168"
+        :bordered="false"
+        size="small"
+        striped
+        :row-key="(row: EmployeeTokenUsageItem) => row.employeeId"
+      />
+    </n-card>
+
     <n-card ref="tableCardRef" class="list-card shell-card" :bordered="false" size="large">
       <div class="list-filter-row">
         <div class="filter-toolbar">
@@ -259,7 +280,7 @@ import { NButton, NTag, NTimeline, NTimelineItem, useMessage } from 'naive-ui';
 import { computed, h, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue';
 import { t } from '@/composables/i18n';
 import { formatAdminDateTime, formatAdminTime } from '@/composables/adminTimezone';
-import { fetchTokenStats, fetchTokenStatsDetail, fetchSessionChatHistory, type TokenStatsItem, type TokenStatsOption, type TokenStatsSummary, type TokenStatsDetail, type ChatMessageItem, type SessionChatHistory } from '@/api/token-stats';
+import { fetchTokenStats, fetchTokenStatsDetail, fetchSessionChatHistory, fetchEmployeeTokenUsage, type TokenStatsItem, type TokenStatsOption, type TokenStatsSummary, type TokenStatsDetail, type ChatMessageItem, type SessionChatHistory, type EmployeeTokenUsageItem } from '@/api/token-stats';
 
 const message = useMessage();
 const loading = ref(false);
@@ -288,7 +309,12 @@ const pageRef = ref<HTMLElement | null>(null);
 const metricsRef = ref<HTMLElement | null>(null);
 const tableCardRef = ref<{ $el?: HTMLElement } | null>(null);
 const tablePaginationRef = ref<HTMLElement | null>(null);
+const employeeCardRef = ref<{ $el?: HTMLElement } | null>(null);
 let tableResizeObserver: ResizeObserver | null = null;
+
+// 数字员工成本归属：按数字员工聚合的用量表（无数据时整卡隐藏）。
+const employeeUsage = ref<EmployeeTokenUsageItem[]>([]);
+const employeeUsageLoading = ref(false);
 
 const departmentOptions = ref<TokenStatsOption[]>([]);
 const modelOptions = ref<TokenStatsOption[]>([]);
@@ -818,6 +844,39 @@ function formatTime(value: string | null) {
   return formatAdminDateTime(value, '—');
 }
 
+const employeeColumns = computed<DataTableColumns<EmployeeTokenUsageItem>>(() => [
+  {
+    title: t('数字员工'),
+    key: 'employeeName',
+    minWidth: 200,
+    ellipsis: { tooltip: true },
+    render: (row) =>
+      h('div', { class: 'employee-usage-name' }, [
+        h('span', row.employeeName),
+        row.employeeStatus === 'disabled'
+          ? h(NTag, { size: 'small', bordered: false }, { default: () => t('停用') })
+          : null,
+      ]),
+  },
+  { title: t('调用次数'), key: 'calls', width: 100, render: (row) => formatNumber(row.calls) },
+  { title: t('总 Tokens'), key: 'totalTokens', width: 130, render: (row) => formatNumber(row.totalTokens) },
+  { title: 'Prompt', key: 'promptTokens', width: 130, render: (row) => formatNumber(row.promptTokens) },
+  { title: 'Completion', key: 'completionTokens', width: 130, render: (row) => formatNumber(row.completionTokens) },
+  { title: t('最近调用'), key: 'lastCalledAt', width: 160, render: (row) => formatTime(row.lastCalledAt) },
+]);
+
+async function loadEmployeeUsage() {
+  employeeUsageLoading.value = true;
+  try {
+    employeeUsage.value = await fetchEmployeeTokenUsage();
+  } catch (error) {
+    console.error(error);
+    message.error(t('数字员工用量加载失败'));
+  } finally {
+    employeeUsageLoading.value = false;
+  }
+}
+
 async function loadData() {
   loading.value = true;
   try {
@@ -861,14 +920,16 @@ function recalcTableHeight() {
   const pageStyle = window.getComputedStyle(pageEl);
   const rowGap = Number.parseFloat(pageStyle.rowGap || pageStyle.gap || '0') || 0;
 
-  // metrics 和 tableCard 之间有 1 个竖向 gap。
-  const sectionGaps = rowGap;
+  // metrics、数字员工用量卡片和 tableCard 之间各有一个竖向 gap。
+  const employeeEl = employeeCardRef.value?.$el as HTMLElement | undefined;
+  const employeeHeight = employeeEl ? employeeEl.offsetHeight : 0;
+  const sectionGaps = rowGap * (employeeHeight > 0 ? 2 : 1);
 
   // 获得 list-filter-row 的真实高度
   const filterRowEl = tableRootEl.querySelector('.list-filter-row') as HTMLElement | null;
   const filterHeight = filterRowEl ? filterRowEl.offsetHeight : 0;
 
-  const tableCardOuterHeight = Math.max(0, pageHeight - metricsHeight - sectionGaps);
+  const tableCardOuterHeight = Math.max(0, pageHeight - metricsHeight - sectionGaps - employeeHeight);
 
   const tableContentEl = tableRootEl.querySelector('.n-card__content') as HTMLElement | null;
   if (!tableContentEl) {
@@ -937,6 +998,7 @@ onMounted(() => {
     }
   });
   void loadData();
+  void loadEmployeeUsage();
 });
 
 onBeforeUnmount(() => {
@@ -947,10 +1009,19 @@ onBeforeUnmount(() => {
   }
 });
 
+let employeeCardObserved = false;
 watch(
-  [items, total, page, pageSize, loading],
+  [items, total, page, pageSize, loading, employeeUsage],
   () => {
-    nextTick(() => recalcTableHeight());
+    nextTick(() => {
+      // The employee-usage card mounts only once data arrives; start observing it then.
+      const employeeEl = employeeCardRef.value?.$el as HTMLElement | undefined;
+      if (!employeeCardObserved && employeeEl && tableResizeObserver) {
+        tableResizeObserver.observe(employeeEl);
+        employeeCardObserved = true;
+      }
+      recalcTableHeight();
+    });
   },
   { deep: true },
 );
@@ -1064,6 +1135,27 @@ watch(
   flex: 1;
   min-height: 0;
   overflow: hidden;
+}
+
+.employee-usage-card {
+  flex: 0 0 auto;
+}
+
+.employee-usage-card :deep(.n-card__content) {
+  padding: 10px 16px 12px !important;
+}
+
+.employee-usage-name {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.employee-usage-name > span:first-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .list-card :deep(.n-card__content) {

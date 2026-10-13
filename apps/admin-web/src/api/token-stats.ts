@@ -162,3 +162,20 @@ export async function fetchSessionChatHistory(requestId: string): Promise<Sessio
   const { data } = await apiClient.get(`/api/analytics/token-usage/${requestId}/chat-history`);
   return data;
 }
+
+// 数字员工成本归属: per-employee grouping of employee-session token usage.
+export interface EmployeeTokenUsageItem {
+  employeeId: string;
+  employeeName: string;
+  employeeStatus: string;
+  calls: number;
+  totalTokens: number;
+  promptTokens: number;
+  completionTokens: number;
+  lastCalledAt: string | null;
+}
+
+export async function fetchEmployeeTokenUsage(): Promise<EmployeeTokenUsageItem[]> {
+  const { data } = await apiClient.get('/api/analytics/employee-token-usage');
+  return Array.isArray(data?.items) ? data.items : [];
+}
