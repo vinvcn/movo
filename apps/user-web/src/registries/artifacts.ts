@@ -30,7 +30,22 @@ export function resolveArtifact(kind: string): ArtifactDescriptor {
 }
 
 export function resolveArtifactPresentation(artifact: ArtifactIdentity): ArtifactDescriptor {
-  return resolveArtifact(resolveArtifactKind(artifact))
+  const kind = resolveArtifactKind(artifact)
+  const descriptor = resolveArtifact(kind)
+  // edit/preview/export drive MOVO's own presentation deck: they need the
+  // blueprint-backed bundle (deck_ir_artifact / preview_metadata / html_preview).
+  // A plain pptx delivered as a file (e.g. an external tool's brochure) has no
+  // such bundle, so the card offers download only.
+  if ((kind === 'pptx' || kind === 'ppt') && !hasPresentationBundle(artifact)) {
+    return { ...descriptor, actions: ['download'] }
+  }
+  return descriptor
+}
+
+function hasPresentationBundle(artifact: ArtifactIdentity): boolean {
+  const bundle = artifact.bundle
+  if (!bundle || typeof bundle !== 'object') return false
+  return Boolean(bundle.deck_ir_artifact || bundle.preview_metadata || bundle.html_preview)
 }
 
 export function resolveArtifactIcon(type: string): string {

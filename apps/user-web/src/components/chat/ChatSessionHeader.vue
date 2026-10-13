@@ -1,6 +1,24 @@
 <template>
   <header class="flex h-12 shrink-0 items-center justify-between gap-3 border-b border-gray-200 bg-white px-4">
-    <span class="min-w-0 flex-1 truncate text-[13px] font-semibold text-slate-700" :title="headerTitle">{{ headerTitle }}</span>
+    <div class="flex min-w-0 flex-1 items-center gap-2">
+      <span class="min-w-0 flex-1 truncate text-[13px] font-semibold text-slate-700" :title="headerTitle">{{ headerTitle }}</span>
+      <!-- #42: the session's bound digital-employee identity; avatar falls back
+           to the name's first letter when the employee has no avatar_url. -->
+      <span
+        v-if="digitalEmployee"
+        class="flex shrink-0 items-center gap-1.5 rounded-full border border-gray-200 bg-gray-50 py-0.5 pl-0.5 pr-2.5"
+        :title="digitalEmployee.name"
+      >
+        <img
+          v-if="digitalEmployeeAvatarUrl"
+          :src="digitalEmployeeAvatarUrl"
+          :alt="digitalEmployee.name"
+          class="h-5 w-5 rounded-full object-cover"
+        />
+        <span v-else class="flex h-5 w-5 items-center justify-center rounded-full bg-blue-100 text-[10px] font-semibold text-blue-700">{{ digitalEmployeeAvatarInitial }}</span>
+        <span class="max-w-[120px] truncate text-[11px] font-medium text-slate-600">{{ digitalEmployee.name }}</span>
+      </span>
+    </div>
     <div class="flex shrink-0 items-center gap-1">
       <button
         v-if="detail && (viewerMode === 'participant' || canShare)"
@@ -37,6 +55,7 @@ import { computed, ref, watch } from 'vue'
 import SessionShareDialog from '../session/SessionShareDialog.vue'
 import { getSession, type SessionDetail } from '../../api/sessions'
 import { t } from '../../composables/i18n'
+import { digitalEmployeeInitial, resolveEmployeeAvatarUrl } from '../../composables/digitalEmployeeSession'
 
 const props = defineProps<{
   sessionId: string | null
@@ -127,6 +146,14 @@ const canShare = computed(() => {
 })
 
 const headerTitle = computed(() => detail.value?.title || props.title || '')
+
+// #42: the bound digital-employee identity, straight from the session detail
+// payload; null for ordinary conversations keeps the header unchanged.
+const digitalEmployee = computed(() => detail.value?.digital_employee || null)
+const digitalEmployeeAvatarInitial = computed(() => digitalEmployeeInitial(digitalEmployee.value?.name))
+// The stored avatar URL bakes the port it was installed on, so resolve it against
+// this stack's origin — same rule as the composer and the expert shelf.
+const digitalEmployeeAvatarUrl = computed(() => resolveEmployeeAvatarUrl(digitalEmployee.value?.avatar_url))
 
 // T24 wiring: the dialog's mutations change header-visible data — removed/revoked
 // refresh the participant count (a mutation can also bound staleness from an

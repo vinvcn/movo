@@ -86,6 +86,9 @@ export type SessionSummary = {
   runtime_preset_id?: string
   model_instance_id?: string | null
   code_project?: { workspace_id: string; git_branch: string; worktree: boolean } | null
+  /** #42: identity projection of the session's bound digital employee; null
+   *  when the conversation is ordinary. Snake_case like the other session fields. */
+  digital_employee?: { id: string; name: string; avatar_url?: string | null } | null
 }
 
 export type SessionDetail = SessionSummary & {

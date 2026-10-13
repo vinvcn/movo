@@ -71,7 +71,7 @@ test('unsafe avatar urls return initials and never echo the raw value', () => {
     'javascript:alert(1)',
     'data:image/png;base64,AAAA',
     'objects/users/u1/avatar.png',
-    '/files/avatar.png',
+    '//evil.example/avatar.png',
     'ftp://cdn.example.com/u1.png',
     'https://cdn.example.com/a b.png',
   ]
@@ -88,5 +88,13 @@ test('http avatar urls stay valid for local deployments', () => {
   assert.deepEqual(
     resolveAuthorPresentation({ display_name: 'Alice', avatar_url: local }),
     { kind: 'image', src: local, alt: 'Alice' },
+  )
+})
+
+test('same-origin signed avatar paths render as images', () => {
+  const signed = '/askai-api/api/files/avatars_u1/2026/09/24/avatar_469f.png?expires=1790254191&signature=d73f'
+  assert.deepEqual(
+    resolveAuthorPresentation({ display_name: 'Li Si', avatar_url: signed }),
+    { kind: 'image', src: signed, alt: 'Li Si' },
   )
 })

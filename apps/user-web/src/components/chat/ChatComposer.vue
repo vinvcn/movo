@@ -1,8 +1,10 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import type { ChatModelOption } from '../../api/models'
+import type { AvailableDigitalEmployee } from '../../api/digitalEmployees'
 import { fetchSelectableSkills, type SelectableSkillItem } from '../../api/skills'
 import { t, useLocale } from '../../composables/i18n'
+import { digitalEmployeeInitial } from '../../composables/digitalEmployeeSession'
 import type { ChatDocumentKind, PendingDocument } from './types'
 import { NModal } from 'naive-ui'
 import SkillFeedbackPanel from '../skills/SkillFeedbackPanel.vue'
@@ -27,12 +29,20 @@ const props = defineProps<{
   mainId?: string
   allowKnowledge?: boolean
   allowSkills?: boolean
+  /** #42: digital-employee picker — offered only for a pane that has no
+   *  session yet; ChatWindow loads the tenant-scoped list. */
+  digitalEmployees?: AvailableDigitalEmployee[]
+  digitalEmployeeSelectable?: boolean
+  selectedDigitalEmployeeId?: string
+  digitalEmployeeSelectorLabel?: string
+  digitalEmployeeLoadError?: string
 }>()
 
 const emit = defineEmits<{
   (e: 'send', payload: { text: string; images: File[]; documents: PendingDocument[]; knowledgeQaEnabled: boolean; selectedSkillId?: string; modelId?: string; onRejected?: () => void }): void
   (e: 'stop'): void
   (e: 'select-model', modelId: string): void
+  (e: 'select-digital-employee', employeeId: string): void
   (e: 'image-preview', payload: { src: string; alt: string }): void
 }>()
 
@@ -49,6 +59,8 @@ const attachmentMenuRef = ref<HTMLElement | null>(null)
 const knowledgeQaEnabled = ref(false)
 const modelDropdownOpen = ref(false)
 const modelSelectorRef = ref<HTMLElement | null>(null)
+const digitalEmployeeDropdownOpen = ref(false)
+const digitalEmployeeSelectorRef = ref<HTMLElement | null>(null)
 const skillPickerOpen = ref(false)
 const skillPickerLoading = ref(false)
 const skillPickerLoadingMore = ref(false)
@@ -71,6 +83,28 @@ const skillScopeOptions = computed<Array<{ key: 'all' | 'user' | 'organization';
   { key: 'user', label: locale.value === 'zh' ? '我的' : 'Mine' },
   { key: 'organization', label: locale.value === 'zh' ? '企业' : 'Org' },
 ])
+
+// #42: the digital-employee picker stays hidden until the tenant actually
+// offers employees, so the default 普通 experience is exactly today's UI.
+const selectedDigitalEmployee = computed(() => (
+  (props.digitalEmployees || []).find((item) => item.id === props.selectedDigitalEmployeeId) || null
+))
+// 只有「还没有 session 的 pane」能改选数字员工：服务端在会话创建后把绑定视为不可变
+// （digitalEmployeeSession.ts 的 newSessionDigitalEmployeeId 同理）。
+const digitalEmployeeChipInteractive = computed(() => (
+  props.digitalEmployeeSelectable === true && (props.digitalEmployees?.length || 0) > 0
+))
+// 已绑定数字员工但不可再选的会话（历史会话重新打开），芯片退化为只读身份标识 ——
+// 这正是「在输入框工具条左侧明确显示当前会话由谁在答」的那一半场景。
+const digitalEmployeeChipVisible = computed(() => (
+  digitalEmployeeChipInteractive.value || Boolean(selectedDigitalEmployee.value)
+))
+const digitalEmployeeTriggerTitle = computed(() => (
+  props.digitalEmployeeLoadError
+  || selectedDigitalEmployee.value?.description
+  || props.digitalEmployeeSelectorLabel
+  || ''
+))
 
 function autoResizeComposerInput() {
   const el = composerInputRef.value
@@ -217,6 +251,16 @@ function selectChatModel(modelId: string) {
   modelDropdownOpen.value = false
 }
 
+function toggleDigitalEmployeeDropdown() {
+  if (props.running || !digitalEmployeeChipInteractive.value) return
+  digitalEmployeeDropdownOpen.value = !digitalEmployeeDropdownOpen.value
+}
+
+function selectDigitalEmployee(employeeId: string) {
+  emit('select-digital-employee', employeeId)
+  digitalEmployeeDropdownOpen.value = false
+}
+
 function onGlobalPointerDown(event: Event) {
   const target = event.target as Node | null
   if (!target) return
@@ -227,6 +271,10 @@ function onGlobalPointerDown(event: Event) {
   const modelRoot = modelSelectorRef.value
   if (modelDropdownOpen.value && modelRoot && !modelRoot.contains(target)) {
     modelDropdownOpen.value = false
+  }
+  const employeeRoot = digitalEmployeeSelectorRef.value
+  if (digitalEmployeeDropdownOpen.value && employeeRoot && !employeeRoot.contains(target)) {
+    digitalEmployeeDropdownOpen.value = false
   }
   const pickerRoot = skillPickerRef.value
   const inputRoot = composerInputRef.value
@@ -816,6 +864,103 @@ watch(() => props.allowSkills, (allowed) => {
           </div>
         </div>
         <slot name="model-actions" />
+        <!-- 数字员工芯片：把「当前这个会话是谁在答」
+             摆在输入框工具条左侧。未建会话时可切换，已绑定时只读。 -->
+        <div v-if="digitalEmployeeChipVisible" ref="digitalEmployeeSelectorRef" class="relative min-w-0">
+          <button
+            type="button"
+            class="group flex h-7 max-w-[200px] items-center gap-1.5 rounded-full border py-0.5 pl-[3px] pr-1.5 text-[11px] font-medium transition-colors focus:outline-none focus:ring-2 focus:ring-blue-100"
+            :class="[
+              selectedDigitalEmployee ? 'border-blue-100 bg-blue-50/60 text-blue-700' : 'border-gray-200 bg-white text-slate-600',
+              digitalEmployeeChipInteractive && !running && !blocked
+                ? 'cursor-pointer hover:border-blue-200 hover:text-blue-700'
+                : 'cursor-default',
+            ]"
+            :title="digitalEmployeeChipInteractive ? digitalEmployeeTriggerTitle : t('composer.digital_employee.bound_hint')"
+            :disabled="!digitalEmployeeChipInteractive || running || blocked"
+            :aria-haspopup="digitalEmployeeChipInteractive ? 'listbox' : undefined"
+            :aria-expanded="digitalEmployeeChipInteractive ? digitalEmployeeDropdownOpen : undefined"
+            @click="toggleDigitalEmployeeDropdown"
+          >
+            <img
+              v-if="selectedDigitalEmployee?.avatar_url"
+              :src="selectedDigitalEmployee.avatar_url"
+              :alt="selectedDigitalEmployee.name"
+              class="h-5 w-5 shrink-0 rounded-full object-cover"
+            />
+            <span
+              v-else-if="selectedDigitalEmployee"
+              class="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-blue-100 text-[9px] font-semibold text-blue-700"
+            >{{ digitalEmployeeInitial(selectedDigitalEmployee.name) }}</span>
+            <span
+              v-else
+              class="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-slate-100 text-slate-500"
+            >
+              <svg class="h-3 w-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"></path>
+                <circle cx="12" cy="7" r="4"></circle>
+              </svg>
+            </span>
+            <span class="truncate text-left">{{ digitalEmployeeSelectorLabel }}</span>
+            <svg
+              v-if="digitalEmployeeChipInteractive"
+              class="h-3 w-3 shrink-0 text-slate-400"
+              viewBox="0 0 20 20"
+              fill="none"
+              aria-hidden="true"
+            >
+              <path d="M6 12l4-4 4 4" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" />
+            </svg>
+          </button>
+          <div
+            v-if="digitalEmployeeChipInteractive && digitalEmployeeDropdownOpen"
+            class="absolute bottom-9 left-0 z-40 w-[300px] max-w-[calc(100vw-32px)] overflow-hidden rounded-2xl border border-slate-200 bg-white py-1.5 shadow-xl shadow-slate-900/10"
+          >
+            <button
+              type="button"
+              class="flex w-full items-center gap-3 px-3 py-2.5 text-left transition-colors hover:bg-slate-50"
+              :class="!selectedDigitalEmployeeId ? 'bg-blue-50/80' : ''"
+              @click="selectDigitalEmployee('')"
+            >
+              <span class="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-slate-100 text-slate-500">
+                <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                  <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"></path>
+                  <circle cx="12" cy="7" r="4"></circle>
+                </svg>
+              </span>
+              <span class="min-w-0 flex-1">
+                <span class="block truncate text-sm font-medium text-slate-900">{{ locale === 'zh' ? '普通' : 'Standard' }}</span>
+                <span class="block truncate text-xs text-slate-500">{{ t('composer.digital_employee.none_label') }}</span>
+              </span>
+              <svg v-if="!selectedDigitalEmployeeId" class="h-4 w-4 shrink-0 text-blue-600" viewBox="0 0 20 20" fill="none" aria-hidden="true"><path d="M5 10.5l3 3L15 6.5" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" /></svg>
+            </button>
+            <button
+              v-for="employee in digitalEmployees"
+              :key="employee.id"
+              type="button"
+              class="flex w-full items-center gap-3 px-3 py-2.5 text-left transition-colors hover:bg-slate-50"
+              :class="employee.id === selectedDigitalEmployeeId ? 'bg-blue-50/80' : ''"
+              :title="employee.description || employee.name"
+              @click="selectDigitalEmployee(employee.id)"
+            >
+              <img
+                v-if="employee.avatar_url"
+                :src="employee.avatar_url"
+                :alt="employee.name"
+                class="h-8 w-8 shrink-0 rounded-full object-cover"
+              />
+              <span
+                v-else
+                class="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-blue-100 text-xs font-semibold text-blue-700"
+              >{{ digitalEmployeeInitial(employee.name) }}</span>
+              <span class="min-w-0 flex-1">
+                <span class="block truncate text-sm font-medium text-slate-900">{{ employee.name }}</span>
+                <span v-if="employee.description" class="block truncate text-xs text-slate-500">{{ employee.description }}</span>
+              </span>
+              <svg v-if="employee.id === selectedDigitalEmployeeId" class="h-4 w-4 shrink-0 text-blue-600" viewBox="0 0 20 20" fill="none" aria-hidden="true"><path d="M5 10.5l3 3L15 6.5" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" /></svg>
+            </button>
+          </div>
+        </div>
         <div class="flex-1"></div>
         <div ref="modelSelectorRef" class="relative min-w-0">
           <button

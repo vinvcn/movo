@@ -52,6 +52,7 @@ const ChatWindow = defineAsyncComponent(() => import('./components/ChatWindow.vu
 const SkillsPage = defineAsyncComponent(() => import('./components/MySkillsPage.vue'))
 const ToolsPage = defineAsyncComponent(() => import('./components/MyToolsPage.vue'))
 const KnowledgePage = defineAsyncComponent(() => import('./components/MyKnowledgePage.vue'))
+const DigitalEmployeeShelfPage = defineAsyncComponent(() => import('./components/digital-employees/DigitalEmployeeShelfPage.vue'))
 const SkillConfigPage = defineAsyncComponent(() => import('./components/MySkillConfigPage.vue'))
 const CompositeSkillEditor = defineAsyncComponent(() => import('./components/CompositeSkillEditor.vue'))
 const ScheduledTaskPage = defineAsyncComponent(() => import('./components/scheduled-tasks/ScheduledTaskPage.vue'))
@@ -147,16 +148,22 @@ const pendingDeleteSession = ref<SessionSummary | SessionSearchResult | null>(nu
 const editingSessionId = ref<string | null>(null)
 const editingSessionTitle = ref('')
 const renamingSessionId = ref<string | null>(null)
-const currentView = ref<'chat' | 'skills' | 'tools' | 'knowledge' | 'skill-config' | 'composite-editor' | 'token-usage' | 'scheduled-tasks'>('chat')
+const currentView = ref<'chat' | 'skills' | 'tools' | 'knowledge' | 'digital-employees' | 'skill-config' | 'composite-editor' | 'token-usage' | 'scheduled-tasks'>('chat')
 const desktopPrimarySection = computed<DesktopPrimarySection>(() => {
   if (currentView.value === 'scheduled-tasks') return 'scheduled'
+  // 数字员工货架是 Web 侧栏入口：桌面端没有对应主区，归到 home
+  // 并靠 desktopSecondaryNavigationVisible 收起二级导航，避免高亮错位。
+  if (currentView.value === 'digital-employees') return 'home'
   if (currentView.value === 'skills' || currentView.value === 'skill-config' || currentView.value === 'composite-editor') return 'skills'
   if (currentView.value === 'tools') return 'tools'
   if (currentView.value === 'knowledge') return 'knowledge'
   return 'home'
 })
 const desktopSecondaryNavigationVisible = computed(() =>
-  capabilities.isDesktop && desktopPrimarySection.value === 'home' && !windowsSidebarCollapsed.value,
+  capabilities.isDesktop
+  && desktopPrimarySection.value === 'home'
+  && currentView.value !== 'digital-employees'
+  && !windowsSidebarCollapsed.value,
 )
 const desktopNavigationWidth = computed(() => capabilities.isDesktop
   ? 52 + (desktopSecondaryNavigationVisible.value ? 260 : 0)
@@ -383,6 +390,7 @@ const desktopWindowTitle = computed(() => {
     return current ? displaySessionTitle(current) : t('app.sidebar.new_chat')
   }
   if (currentView.value === 'tools') return t('app.sidebar.tools')
+  if (currentView.value === 'digital-employees') return t('app.sidebar.digital_employees')
   if (currentView.value === 'knowledge') return t('knowledge.sidebar')
   if (currentView.value === 'scheduled-tasks') return locale.value === 'zh' ? '定时任务' : 'Scheduled tasks'
   if (currentView.value === 'token-usage') return t('app.account.usage')
@@ -592,9 +600,23 @@ const sessionSearchDisplayItems = computed(() =>
 )
 const sidebarItems = computed(() => [
   { icon: 'plus', label: t('app.sidebar.new_chat') },
-  ...(capabilities.isDesktop ? [] : [{ icon: 'clock', label: locale.value === 'zh' ? '定时任务' : 'Scheduled tasks' }]),
+  // Web 侧栏专属：数字员工货架紧跟主操作、排在会话历史之前。桌面端由主区导航承载，
+  // 不在此列。知识库与「我的配置」块保持原位置不变。
+  ...(capabilities.isDesktop
+    ? []
+    : [
+        { icon: 'digital-employees', label: t('app.sidebar.digital_employees') },
+        { icon: 'clock', label: locale.value === 'zh' ? '定时任务' : 'Scheduled tasks' },
+      ]),
   { icon: 'search', label: t('app.sidebar.search_chats') },
 ])
+
+/** 侧栏顶部动作区的选中态：搜索是浮层，数字员工货架是整页视图。 */
+function sidebarItemActive(icon: string): boolean {
+  if (icon === 'search') return sessionSearchOpen.value
+  if (icon === 'digital-employees') return currentView.value === 'digital-employees'
+  return false
+}
 const publishChannelSuggestions = [
   'wechat_official',
   'xiaohongshu',
@@ -922,6 +944,7 @@ function resolveViewFromPath(pathname: string) {
   if (path === '/skills') return 'skills'
   if (path === '/tools') return 'tools'
   if (path === '/knowledge') return 'knowledge'
+  if (path === '/digital-employees') return 'digital-employees'
   if (path === '/scheduled-tasks') return 'scheduled-tasks'
   return 'chat'
 }
@@ -930,6 +953,7 @@ function routePathForView(view: typeof currentView.value) {
   if (view === 'token-usage') return '/usage'
   if (view === 'tools') return '/tools'
   if (view === 'knowledge') return '/knowledge'
+  if (view === 'digital-employees') return '/digital-employees'
   if (view === 'scheduled-tasks') return '/scheduled-tasks'
   if (view === 'skills' || view === 'skill-config' || view === 'composite-editor') return '/skills'
   return '/'
@@ -970,6 +994,7 @@ function openScheduledTasks(options: { prompt?: string; sessionId?: string | nul
 
 function handleSidebarAction(icon: string) {
   if (icon === 'plus') startLocalSession({ inheritCurrentProject: true })
+  else if (icon === 'digital-employees') openDigitalEmployeesPage()
   else if (icon === 'clock') openScheduledTasks()
   else openSessionSearch()
 }
@@ -1054,6 +1079,23 @@ function closeSkillsPage() {
 
 function openToolsPage() {
   navigateTo('tools')
+}
+
+function openDigitalEmployeesPage() {
+  navigateTo('digital-employees')
+}
+
+/**
+ * 数字员工货架的「召唤」：新建一个空会话，并把该员工作为这个 pane 的待绑定选择。
+ * 真正的绑定由首条消息的 digitalEmployeeId 落库（服务端在会话创建后拒绝改绑），
+ * 所以这里只走既有的 startLocalSession + selectPaneDigitalEmployee 两个原语。
+ */
+function summonDigitalEmployee(employeeId: string) {
+  const target = String(employeeId || '').trim()
+  if (!target) return
+  startLocalSession()
+  const pane = chatRuntime.activeChatPane.value
+  if (pane) chatRuntime.selectPaneDigitalEmployee(pane.key, target)
 }
 
 function openKnowledgePage() {
@@ -2268,17 +2310,18 @@ onBeforeUnmount(() => {
           v-for="item in sidebarItems"
           :key="item.label"
           class="group flex w-full items-center gap-3 rounded-xl px-3 py-2 text-left text-sm font-medium transition-all active:scale-95"
-          :class="item.icon === 'search' && sessionSearchOpen
+          :class="sidebarItemActive(item.icon)
             ? 'bg-white text-blue-700 shadow-sm border border-gray-200'
             : 'text-gray-700 hover:bg-gray-200/60'"
           @click="handleSidebarAction(item.icon)"
         >
           <span class="text-gray-500 group-hover:text-gray-900 transition-colors">
             <svg v-if="item.icon === 'plus'" xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14m-7-7v14"/></svg>
+            <svg v-else-if="item.icon === 'digital-employees'" xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l1.6 4.4L18 9l-4.4 1.6L12 15l-1.6-4.4L6 9l4.4-1.6z"/><path d="M18 15l.8 2.2L21 18l-2.2.8L18 21l-.8-2.2L15 18l2.2-.8z"/><path d="M6 15l.8 2.2L9 18l-2.2.8L6 21l-.8-2.2L3 18l2.2-.8z"/></svg>
             <svg v-else-if="item.icon === 'clock'" xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>
             <svg v-else-if="item.icon === 'search'" xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>
           </span>
-          <span>{{ item.label }}</span>
+          <span class="truncate">{{ item.label }}</span>
         </button>
       </div>
 
@@ -2748,6 +2791,12 @@ onBeforeUnmount(() => {
             @viewed="refreshPersonalKnowledgeCount"
           />
         </div>
+        <div v-else-if="currentView === 'digital-employees'" class="flex-1 min-w-0 min-h-0 overflow-hidden">
+          <DigitalEmployeeShelfPage
+            :main-id="getMainId()"
+            @summon="summonDigitalEmployee"
+          />
+        </div>
         <div v-else-if="currentView === 'skill-config'" class="flex-1 min-w-0 min-h-0 overflow-hidden">
           <SkillConfigPage
             :skill="selectedSkill"
@@ -2929,10 +2978,13 @@ onBeforeUnmount(() => {
               :initial-messages="pane.messages"
               :session-id="pane.sessionId || undefined"
               :model-instance-id="pane.modelInstanceId || undefined"
+              :digital-employee-id="pane.digitalEmployeeId || ''"
               :active="pane.key === activeChatKey"
               :shared="pane.shared"
               :user-id="getUserId() || undefined"
               :main-id="getMainId()"
+              :user-avatar-url="userProfile?.avatar || ''"
+              :user-display-name="userProfile?.name || ''"
               :auth-token="authToken"
               :running="pane.running"
               :foreign-run="pane.foreignRun"
@@ -2966,6 +3018,7 @@ onBeforeUnmount(() => {
               :agent-policy="userProfile?.agentPolicy"
               @send="(payload) => handlePaneSend(pane.key, payload)"
               @stop="handlePaneStop(pane.key)"
+              @select-digital-employee="(employeeId) => chatRuntime.selectPaneDigitalEmployee(pane.key, employeeId)"
               @refresh-session="refreshOpenSession(pane.sessionId || '')"
               @open-skills="openSkillsPage"
               @open-tools="openToolsPage"

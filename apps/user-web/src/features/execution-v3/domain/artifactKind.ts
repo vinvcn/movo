@@ -7,6 +7,7 @@ export interface ArtifactIdentity {
   url?: string
   signed_url?: string
   content_type?: string
+  bundle?: Record<string, unknown>
 }
 
 const SUPPORTED_KINDS = new Set([

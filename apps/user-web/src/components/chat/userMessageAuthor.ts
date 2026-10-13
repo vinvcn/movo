@@ -4,7 +4,8 @@
  * `UserMessageAuthor.vue` is a thin template delegation to this module, so the
  * headless contract suite can assert the return values without a DOM and
  * `typecheck` proves the wiring. The helper never returns a raw avatar value:
- * unsafe or relative paths degrade to deterministic initials.
+ * unsafe paths degrade to deterministic initials; same-origin /paths pass
+ * through (the backend signs avatar URLs that way).
  */
 
 export type AuthorIdentityInput = {
@@ -37,11 +38,13 @@ function initialsFromName(name: string | null): string {
   return letters.join('') || FALLBACK_INITIALS
 }
 
-/** Allows only absolute http(s) URLs; rejects object paths, protocols, and whitespace. */
+/** Allows absolute http(s) URLs and same-origin paths (/...); rejects protocols, object paths, and whitespace. */
 function safeAvatarUrl(avatarUrl: string | null | undefined): string | null {
   const raw = (avatarUrl ?? '').trim()
   if (!raw) return null
   if (/[\u0000-\u0020\u007f]/.test(raw)) return null
+  // 后端签名的头像地址是同源相对路径，直接交给浏览器解析。
+  if (raw.startsWith('/') && !raw.startsWith('//')) return raw
   let parsed: URL
   try {
     parsed = new URL(raw)

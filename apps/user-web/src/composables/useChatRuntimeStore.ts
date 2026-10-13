@@ -2,6 +2,7 @@ import { computed, markRaw, reactive, ref } from 'vue'
 import { fetchOrgBilling } from '../api/auth'
 import { uploadChatDocument, uploadChatImage, type UploadedDocument, type UploadedImage } from '../api/chat'
 import { getSession, type ChatMessage, type ChatMessageAuthor, type SessionDetail, type SessionSummary } from '../api/sessions'
+import { newSessionDigitalEmployeeId } from './digitalEmployeeSession'
 import { fetchChatMessageEvents, startChatStream, ChatStreamHttpError, SESSION_ALREADY_RUNNING, type ChatStreamHandle } from './useChatStream'
 import {
   applyEffectiveUserMessageId,
@@ -132,6 +133,11 @@ export type ChatRuntimePane = {
   runtimePresetId: string
   modelInstanceId: string
   codeProject: { workspace_id: string; git_branch: string; worktree: boolean } | null
+  /** #42: the digital-employee selection for a conversation that does not
+   *  exist yet; '' means 普通 (no employee). Sent with the FIRST message only;
+   *  once the pane has a session id the binding is immutable and this value is
+   *  never attached to a request again. */
+  digitalEmployeeId: string
   foreignRun: ForeignRun | null
   foreignRunFinished: boolean
   refreshingSession: boolean
@@ -267,6 +273,7 @@ function createPane(input: { key?: string; sessionId: string | null; messages?: 
     runtimePresetId: 'askai-enterprise',
     modelInstanceId: '',
     codeProject: null,
+    digitalEmployeeId: '',
     foreignRun: null,
     foreignRunFinished: false,
     refreshingSession: false,
@@ -842,6 +849,10 @@ async function sendMessage(key: string, input: SendInput, callbacks: RuntimeCall
     const handle = startChatStream(
       {
         modelId: input.modelId || undefined,
+        // #42: attach the pane's digital-employee selection only while this
+        // request CREATES the conversation; the helper omits the field for
+        // existing sessions (immutable binding) and the 普通 default.
+        digitalEmployeeId: newSessionDigitalEmployeeId(pane.sessionId, pane.digitalEmployeeId),
         knowledgeQaEnabled: input.knowledgeQaEnabled,
         timezone: input.timezone,
         messages: pane.messages.slice(0, -1).map((m) => ({
@@ -1059,6 +1070,12 @@ export function useChatRuntimeStore(callbacks: RuntimeCallbacks = {}) {
     pane.runtimePresetId = detail.runtime_preset_id || 'askai-enterprise'
     pane.modelInstanceId = detail.model_instance_id || ''
     pane.codeProject = detail.code_project || null
+    // #42: the server already returns the bound employee on the detail payload.
+    // Re-hydrating the pane ref keeps the composer's employee chip and the
+    // assistant message rows able to render the identity for a conversation
+    // opened from the sidebar — the binding itself stays immutable because
+    // selectPaneDigitalEmployee refuses to change it once a session id exists.
+    pane.digitalEmployeeId = String(detail.digital_employee?.id || '')
     updateForeignRun(pane, detail.active_run, userId)
     pane.shared = detail.access === 'shared' || (detail.participant_count ?? 0) > 0
     pane.liveAuth = { userId, mainId, authToken }
@@ -1187,6 +1204,14 @@ export function useChatRuntimeStore(callbacks: RuntimeCallbacks = {}) {
     if (pane) pane.activeIntervention = null
   }
 
+  /** #42: the per-pane picker selection for a not-yet-created conversation.
+   *  Immutable once the pane has a session id — the server rejects re-binds. */
+  function selectPaneDigitalEmployee(key: string, employeeId: string) {
+    const pane = findPaneByKey(key)
+    if (!pane || pane.sessionId) return
+    pane.digitalEmployeeId = String(employeeId || '').trim()
+  }
+
   function setPanePreviewExpanded(_key: string, _expanded: boolean) {
     // Kept as an API boundary for future sidecar persistence; current expansion
     // remains local to ChatWindow because it is visual-only state.
@@ -1257,6 +1282,7 @@ export function useChatRuntimeStore(callbacks: RuntimeCallbacks = {}) {
     sessionIsUnread,
     clearUnread,
     clearPaneIntervention,
+    selectPaneDigitalEmployee,
     setPanePreviewExpanded,
     beginExternalTurn,
     sendMessage: (key: string, input: SendInput) => sendMessage(key, input, callbacks),

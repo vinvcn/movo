@@ -252,8 +252,18 @@ export const messages = {
   'app.sidebar.load_more': { zh: '加载更多', en: 'Load more' },
   'app.sidebar.marketplace': { zh: '我的 Skills', en: 'My Skills' },
   'app.sidebar.tools': { zh: '我的 Tools', en: 'My Tools' },
+  'app.sidebar.digital_employees': { zh: '数字员工', en: 'Digital employees' },
   'app.sidebar.login_register': { zh: '登录 / 注册', en: 'Sign in / Register' },
   'app.sidebar.standard_plan': { zh: '标准套餐', en: 'Standard Plan' },
+  // 数字员工货架（左侧「数字员工」入口对应的整页视图）
+  'digital_employees.shelf.subtitle': { zh: '选择一位数字员工，直接开一个绑定它的新会话。', en: 'Pick a digital employee to start a new conversation bound to them.' },
+  'digital_employees.shelf.summon': { zh: '召唤', en: 'Summon' },
+  'digital_employees.shelf.empty': { zh: '当前还没有可用的数字员工，请联系管理员为你指派。', en: 'No digital employees are available yet. Ask an administrator to assign one to you.' },
+  'digital_employees.shelf.load_failed': { zh: '数字员工列表加载失败，请稍后重试。', en: 'Could not load the digital employee list. Please try again later.' },
+  'digital_employees.shelf.no_description': { zh: '暂无简介', en: 'No description yet' },
+  // 对话页输入框工具条的数字员工芯片
+  'composer.digital_employee.none_label': { zh: '不使用数字员工', en: 'No digital employee' },
+  'composer.digital_employee.bound_hint': { zh: '本会话已绑定该数字员工，绑定后不可更换', en: 'This conversation is bound to this digital employee; the binding cannot be changed' },
   'app.account': { zh: '账户', en: 'Account' },
   'app.account.upgrade': { zh: '升级套餐', en: 'Upgrade plan' },
   'app.account.usage': { zh: '使用记录', en: 'Usage records' },
